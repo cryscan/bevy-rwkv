@@ -1,0 +1,13 @@
+[package]
+name = "bevy-rwkv"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+bevy = "0.10"
+safetensors = "0.3"
+memmap2 = "0.7"
+bytemuck = { version = "1.13", features = ["extern_crate_alloc"] }
+half = { version = "2.2", features = ["bytemuck"] }

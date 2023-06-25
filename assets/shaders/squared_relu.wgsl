@@ -10,6 +10,7 @@ struct Model {
 
 let BLOCK_SIZE: u32 = 256u;
 
+@compute @workgroup_size(BLOCK_SIZE, 1, 1)
 fn squared_relu(@builtin(global_invocation_id) invocation_id: vec3<u32>) {
     let index = invocation_id.x;
     let token = invocation_id.y;

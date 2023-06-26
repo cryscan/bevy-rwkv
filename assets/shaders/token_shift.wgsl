@@ -6,7 +6,7 @@ struct Model {
 @group(0) @binding(0) var<uniform> model: Model;
 
 @group(1) @binding(0) var<storage, read> time_mix: array<f32>;      // (C)
-@group(1) @binding(1) var<storage, read> x: array<f32>;            // (T, C)
+@group(1) @binding(1) var<storage, read> x: array<f32>;             // (T, C)
 @group(1) @binding(2) var<storage, read> sx: array<f32>;            // (T, C)
 @group(1) @binding(3) var<storage, read_write> output: array<f32>;  // (T, C)
 

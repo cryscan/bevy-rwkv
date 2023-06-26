@@ -1,9 +1,5 @@
-struct Model {
-    num_layers: u32,
-    num_embd: u32,
-};
-
-@group(0) @binding(0) var<uniform> model: Model;
+@group(0) @binding(0) var<uniform> num_layers: u32;
+@Group(0) @binding(1) var<uniform> num_embd: u32;
 
 @group(1) @binding(0) var<storage, read> x: array<f32>;                 // (T, C)
 @group(1) @binding(1) var<storage, read> r: array<f32>;                 // (T, C)
@@ -19,8 +15,8 @@ fn output_gate(@builtin(global_invocation_id) invocation_id: vec3<u32>, @builtin
     let token = invocation_id.y;
     let num_tokens = num_blocks.y;
 
-    if index < model.num_embd {
-        let ti = token * model.num_embd + index;
+    if index < num_embd {
+        let ti = token * num_embd + index;
         let s = 1.0 / (1.0 + exp(-r[ti]));
         output[ti] = s * o[ti];
 

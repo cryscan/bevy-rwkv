@@ -1,16 +1,12 @@
-struct Model {
-    num_layers: u32,
-    num_embd: u32,
-};
-
-@group(0) @binding(0) var<uniform> model: Model;
+@group(0) @binding(0) var<uniform> num_layers: u32;
+@Group(0) @binding(1) var<uniform> num_embd: u32;
 
 @group(1) @binding(0) var<uniform> dims: vec2<u32>;                 // should be [C, R]
 @group(1) @binding(1) var<storage, read> matrix: array<u32>;        // (R, C / 2)
 @group(1) @binding(2) var<storage, read> input: array<f32>;         // (T, C)
 @group(1) @binding(3) var<storage, read_write> output: array<f32>;  // (T, R)
 
-let BLOCK_SIZE: u32 = 1024u;
+let BLOCK_SIZE: u32 = 256u;
 
 var<workgroup> local_sum: array<f32, BLOCK_SIZE>;
 
@@ -36,8 +32,6 @@ fn matmul(@builtin(global_invocation_id) invocation_id: vec3<u32>) {
         local_sum[index] += dot(x, m);
     }
 
-    reduce_step_barrier(index, 512u);
-    reduce_step_barrier(index, 256u);
     reduce_step_barrier(index, 128u);
     reduce_step_barrier(index, 64u);
     reduce_step_barrier(index, 32u);

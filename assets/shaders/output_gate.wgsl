@@ -4,8 +4,8 @@
 @group(1) @binding(0) var<storage, read> x: array<vec4<f32>>;               // (T, C)
 @group(1) @binding(1) var<storage, read> r: array<vec4<f32>>;               // (T, C)
 @group(1) @binding(2) var<storage, read> o: array<vec4<f32>>;               // (T, C)
-@group(1) @binding(3) var<storage, read_write> output: array<vec4<f32>>;    // (T, C)
-@group(1) @binding(4) var<storage, read_write> sx: array<vec4<f32>>;        // (C)
+@group(1) @binding(3) var<storage, read_write> sx: array<vec4<f32>>;        // (C)
+@group(1) @binding(4) var<storage, read_write> output: array<vec4<f32>>;    // (T, C)
 
 let BLOCK_SIZE: u32 = 256u;
 

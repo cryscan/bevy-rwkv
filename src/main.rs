@@ -169,7 +169,7 @@ impl FromWorld for ModelPipeline {
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
-                        min_binding_size: Some(u32::min_size()),
+                        min_binding_size: Some(UVec2::min_size()),
                     },
                     count: None,
                 },

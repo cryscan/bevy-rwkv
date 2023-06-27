@@ -10,7 +10,7 @@
 const BLOCK_SIZE: u32 = 256u;
 
 @compute @workgroup_size(256, 1, 1)
-fn output_gate(@builtin(global_invocation_id) invocation_id: vec3<u32>, @builtin(num_workgroups) num_blocks: vec3<u32>) {
+fn channel_mix(@builtin(global_invocation_id) invocation_id: vec3<u32>, @builtin(num_workgroups) num_blocks: vec3<u32>) {
     let index = invocation_id.x;
     let token = invocation_id.y;
     let stride = num_embd / 4u;
@@ -18,8 +18,8 @@ fn output_gate(@builtin(global_invocation_id) invocation_id: vec3<u32>, @builtin
 
     if index < stride {
         let ti = token * stride + index;
-        let s = 1.0 / (1.0 + exp(-r[ti]));
-        output[ti] = s * o[ti];
+        let rr = 1.0 / (1.0 + exp(-r[ti]));
+        output[ti] = rr * o[ti];
 
         if token == num_tokens - 1u {
             sx[index] = x[ti];

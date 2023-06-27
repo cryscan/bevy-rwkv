@@ -102,7 +102,7 @@ pub struct GpuLayerBuffer {
     pub ffn_k: BufferVec<Vec4>,  // mul(w_k, ffn_kx)
     pub ffn_k2: BufferVec<Vec4>, // max(ffn_k, 0)^2
     pub ffn_r: BufferVec<Vec4>,  // mul(w_v, ffn_k2)
-    pub ffn_o: BufferVec<Vec4>,  // channel_miz
+    pub ffn_o: BufferVec<Vec4>,  // channel_mix
 }
 
 #[derive(Resource)]

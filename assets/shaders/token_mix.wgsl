@@ -1,5 +1,5 @@
 @group(0) @binding(0) var<uniform> num_layers: u32;
-@Group(0) @binding(1) var<uniform> num_embd: u32;
+@group(0) @binding(1) var<uniform> num_embd: u32;
 
 @group(1) @binding(0) var<storage, read> time_decay: array<vec4<f32>>;      // (C)
 @group(1) @binding(1) var<storage, read> time_first: array<vec4<f32>>;      // (C)
@@ -13,9 +13,9 @@
 
 @group(1) @binding(7) var<storage, read_write> output: array<vec4<f32>>;    // (T, C)
 
-let BLOCK_SIZE: u32 = 256u;
+const BLOCK_SIZE: u32 = 256u;
 
-@compute @workgroup_size(BLOCK_SIZE, 1, 1)
+@compute @workgroup_size(256, 1, 1)
 fn token_mix(@builtin(global_invocation_id) invocation_id: vec3<u32>, @builtin(num_workgroups) num_blocks: vec3<u32>) {
     let index = invocation_id.x;
     let stride = num_embd / 4u;
@@ -27,23 +27,23 @@ fn token_mix(@builtin(global_invocation_id) invocation_id: vec3<u32>, @builtin(n
         let kk = k[ti];
         let vv = v[ti];
 
-        let ww = time_first[index] + kk;
         let aa = a[index];
         let bb = b[index];
         let pp = p[index];
-        let q = max(pp, ww);
-        let e1 = exp(pp - q);
-        let e2 = exp(ww - q);
+        var ww = time_first[index] + kk;
+        var q = max(pp, ww);
+        var e1 = exp(pp - q);
+        var e2 = exp(ww - q);
 
         output[ti] = (e1 * aa + e2 * vv) / (e1 * bb + e2);
         storageBarrier();
 
-        let ww = time_decay[index] + pp;
-        let q = max(ww, kk);
-        let e1 = exp(ww - q);
-        let e2 = exp(kk - q);
+        ww = time_decay[index] + pp;
+        q = max(ww, kk);
+        e1 = exp(ww - q);
+        e2 = exp(kk - q);
         a[index] = e1 * aa + e2 * vv;
-        b[index] = e1 * bb + e2
+        b[index] = e1 * bb + e2;
         p[index] = q;
         storageBarrier();
     }

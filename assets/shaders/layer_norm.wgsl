@@ -1,17 +1,17 @@
 @group(0) @binding(0) var<uniform> num_layers: u32;
-@Group(0) @binding(1) var<uniform> num_embd: u32;
+@group(0) @binding(1) var<uniform> num_embd: u32;
 
 @group(1) @binding(0) var<storage, read> x: array<vec4<f32>>;               // (T, C)
 @group(1) @binding(1) var<storage, read> w: array<vec4<f32>>;               // (C)
 @group(1) @binding(2) var<storage, read> b: array<vec4<f32>>;               // (C)
 @group(1) @binding(3) var<storage, read_write> output: array<vec4<f32>>;    // (T, C)
 
-let BLOCK_SIZE: u32 = 256u;
+const BLOCK_SIZE: u32 = 256u;
 
 var<workgroup> sum: array<vec4<f32>, BLOCK_SIZE>;
 var<workgroup> sum_squared: array<vec4<f32>, BLOCK_SIZE>;
 var<workgroup> mean: f32;
-var<workgroup> std: f32;
+var<workgroup> deviation: f32;
 
 fn reduce_step_barrier(index: u32, stride: u32) {
     if index < stride {
@@ -26,7 +26,7 @@ fn reduce_step(index: u32, stride: u32) {
     sum_squared[index] += sum_squared[index + stride];
 }
 
-@compute @workgroup_size(BLOCK_SIZE, 1, 1)
+@compute @workgroup_size(256, 1, 1)
 fn layer_norm(@builtin(global_invocation_id) invocation_id: vec3<u32>) {
     let index = invocation_id.x;
     let token = invocation_id.y;
@@ -54,12 +54,12 @@ fn layer_norm(@builtin(global_invocation_id) invocation_id: vec3<u32>) {
 
     if index == 0u {
         mean = dot(sum[0], vec4<f32>(1.0)) / f32(num_embd);
-        std = sqrt(dot(sum_squared[0], vec4<f32>(1.0)) / f32(num_embd) - mean * mean);
+        deviation = sqrt(dot(sum_squared[0], vec4<f32>(1.0)) / f32(num_embd) - mean * mean);
     }
     workgroupBarrier();
 
     for (var i = index; i < stride; i += BLOCK_SIZE) {
-        let value = (x[stride * token + i] - mean) / std;
+        let value = (x[stride * token + i] - mean) / deviation;
         output[stride * token + i] = value * w[i] + b[i];
     }
 }

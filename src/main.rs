@@ -63,12 +63,16 @@ pub struct GpuFfn {
 }
 
 pub struct GpuLayer {
+    pub num_embd: u32,
+
     pub layer_norm: [GpuLayerNorm; 2],
     pub att: GpuAtt,
     pub ffn: GpuFfn,
 }
 
-pub struct GpuState {
+pub struct GpuLayerState {
+    pub num_embd: u32,
+
     pub att_x: BufferVec<Vec4>,
     pub att_a: BufferVec<Vec4>,
     pub att_b: BufferVec<Vec4>,
@@ -76,7 +80,8 @@ pub struct GpuState {
     pub ffn_x: BufferVec<Vec4>,
 }
 
-pub struct GpuLayerTensor {
+pub struct GpuLayerBuffer {
+    pub num_embd: u32,
     pub num_tokens: u32,
 
     pub in_x: BufferVec<Vec4>,

@@ -3,7 +3,7 @@
 
 @group(1) @binding(0) var<storage, read> x: array<vec4<f32>>;               // (T, C)
 @group(1) @binding(1) var<storage, read> r: array<vec4<f32>>;               // (T, C)
-@group(1) @binding(2) var<storage, read> o: array<vec4<f32>>;               // (T, C)
+@group(1) @binding(2) var<storage, read> v: array<vec4<f32>>;               // (T, C)
 @group(1) @binding(3) var<storage, read_write> sx: array<vec4<f32>>;        // (C)
 @group(1) @binding(4) var<storage, read_write> output: array<vec4<f32>>;    // (T, C)
 
@@ -19,7 +19,7 @@ fn channel_mix(@builtin(global_invocation_id) invocation_id: vec3<u32>, @builtin
     if index < stride {
         let ti = token * stride + index;
         let rr = 1.0 / (1.0 + exp(-r[ti]));
-        output[ti] = rr * o[ti];
+        output[ti] = rr * v[ti];
 
         if token == num_tokens - 1u {
             sx[index] = x[ti];

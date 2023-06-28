@@ -2,6 +2,7 @@
 @group(0) @binding(1) var<uniform> num_embd: u32;
 
 @group(1) @binding(0) var<uniform> num_tokens: u32;
+
 @group(1) @binding(1) var<storage, read> time_decay: array<vec4<f32>>;      // (C)
 @group(1) @binding(2) var<storage, read> time_first: array<vec4<f32>>;      // (C)
 

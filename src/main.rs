@@ -3,7 +3,7 @@ use bevy::{
     render::{
         extract_component::{ExtractComponent, ExtractComponentPlugin},
         render_resource::*,
-        renderer::RenderDevice,
+        renderer::{RenderDevice, RenderQueue},
         RenderApp,
     },
 };
@@ -549,6 +549,32 @@ pub struct GpuLayerState {
     pub ffn_x: BufferVec<Vec4>,
 }
 
+impl GpuLayerState {
+    pub fn new(device: &RenderDevice, model: &Model) -> Self {
+        let usages = BufferUsages::STORAGE | BufferUsages::COPY_DST;
+        let mut att_x = BufferVec::new(usages);
+        let mut att_a = BufferVec::new(usages);
+        let mut att_b = BufferVec::new(usages);
+        let mut att_p = BufferVec::new(usages);
+        let mut ffn_x = BufferVec::new(usages);
+
+        let size = model.num_embd as usize / 4;
+        att_x.reserve(size, device);
+        att_a.reserve(size, device);
+        att_b.reserve(size, device);
+        att_p.reserve(size, device);
+        ffn_x.reserve(size, device);
+
+        Self {
+            att_x,
+            att_a,
+            att_b,
+            att_p,
+            ffn_x,
+        }
+    }
+}
+
 pub struct GpuLayerBuffer {
     pub num_tokens: UniformBuffer<u32>,
 
@@ -572,6 +598,79 @@ pub struct GpuLayerBuffer {
     pub ffn_v: BufferVec<Vec4>, // mul(w_v, ffn_vx)
     pub ffn_r: BufferVec<Vec4>, // mul(w_r, ffn_rx)
     pub ffn_o: BufferVec<Vec4>, // channel_mix
+}
+
+impl GpuLayerBuffer {
+    pub fn new(device: &RenderDevice, queue: &RenderQueue, model: &Model, num_tokens: u32) -> Self {
+        let usages = BufferUsages::STORAGE | BufferUsages::COPY_DST;
+        let mut in_x = BufferVec::new(usages);
+        let mut att_x = BufferVec::new(usages);
+        let mut att_kx = BufferVec::new(usages);
+        let mut att_vx = BufferVec::new(usages);
+        let mut att_rx = BufferVec::new(usages);
+        let mut att_k = BufferVec::new(usages);
+        let mut att_v = BufferVec::new(usages);
+        let mut att_r = BufferVec::new(usages);
+        let mut att_w = BufferVec::new(usages);
+        let mut att_o = BufferVec::new(usages);
+        let mut ffn_x = BufferVec::new(usages);
+        let mut ffn_kx = BufferVec::new(usages);
+        let mut ffn_vx = BufferVec::new(usages);
+        let mut ffn_rx = BufferVec::new(usages);
+        let mut ffn_k = BufferVec::new(usages);
+        let mut ffn_v = BufferVec::new(usages);
+        let mut ffn_r = BufferVec::new(usages);
+        let mut ffn_o = BufferVec::new(usages);
+
+        let size = model.num_embd as usize / 4;
+        for buffer in [
+            &mut in_x,
+            &mut att_x,
+            &mut att_kx,
+            &mut att_vx,
+            &mut att_rx,
+            &mut att_k,
+            &mut att_v,
+            &mut att_r,
+            &mut att_w,
+            &mut att_o,
+            &mut ffn_x,
+            &mut ffn_kx,
+            &mut ffn_vx,
+            &mut ffn_rx,
+            &mut ffn_k,
+            &mut ffn_v,
+            &mut ffn_r,
+            &mut ffn_o,
+        ] {
+            buffer.reserve(size, device);
+        }
+
+        let mut num_tokens = UniformBuffer::from(num_tokens);
+        num_tokens.write_buffer(device, queue);
+
+        Self {
+            num_tokens,
+            in_x,
+            att_x,
+            att_kx,
+            att_vx,
+            att_rx,
+            att_k,
+            att_v,
+            att_r,
+            att_w,
+            att_o,
+            ffn_x,
+            ffn_kx,
+            ffn_vx,
+            ffn_rx,
+            ffn_k,
+            ffn_v,
+            ffn_r,
+            ffn_o,
+        }
+    }
 }
 
 pub struct LayerBindGroup {

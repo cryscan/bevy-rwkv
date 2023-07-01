@@ -10,7 +10,8 @@ pub struct LoadPlugin;
 
 impl Plugin for LoadPlugin {
     fn build(&self, app: &mut App) {
-        app.add_asset::<ModelAsset>();
+        app.add_asset::<ModelAsset>()
+            .init_asset_loader::<ModelAssetLoader>();
     }
 }
 
@@ -39,7 +40,6 @@ impl AssetLoader for ModelAssetLoader {
                 for i in model.names() {
                     const PREFIX: &str = "blocks.";
                     if let Some(i) = i.strip_prefix(PREFIX) {
-                        // let i = &i[PREFIX.len()..];
                         let i = &i[..i.find('.').unwrap_or(0)];
                         r = r.max(i.parse::<u32>()?)
                     }
@@ -47,12 +47,12 @@ impl AssetLoader for ModelAssetLoader {
                 r + 1
             };
 
-            let embd = model.tensor("emb.weight")?;
+            let embd = model.tensor("head.weight")?;
 
             load_context.set_default_asset(LoadedAsset::new(ModelAsset {
                 num_layers,
-                num_embd: embd.shape()[0] as u32,
-                num_vocab: embd.shape()[1] as u32,
+                num_embd: embd.shape()[1] as u32,
+                num_vocab: embd.shape()[0] as u32,
             }));
             Ok(())
         })

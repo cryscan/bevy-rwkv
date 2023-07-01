@@ -1,7 +1,6 @@
 use bevy::{
     prelude::*,
     render::{
-        extract_component::{ExtractComponent, ExtractComponentPlugin},
         render_resource::*,
         renderer::{RenderDevice, RenderQueue},
         RenderApp,
@@ -12,19 +11,9 @@ pub struct ModelPlugin;
 
 impl Plugin for ModelPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugin(ExtractComponentPlugin::<Model>::default());
-
         let render_app = app.sub_app_mut(RenderApp);
         render_app.init_resource::<ModelPipeline>();
     }
-}
-
-#[derive(Clone, Copy, Default, Debug, AsBindGroup, Component, ExtractComponent)]
-pub struct Model {
-    #[uniform(0)]
-    pub num_layers: u32,
-    #[uniform(1)]
-    pub num_embd: u32,
 }
 
 #[derive(Resource)]
@@ -422,7 +411,7 @@ impl FromWorld for ModelPipeline {
             ],
         });
 
-        let model_layout = Model::bind_group_layout(device);
+        let model_layout = GpuModel::bind_group_layout(device);
         let layer_norm_pipeline =
             pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
                 label: Some("layer_norm_pipeline".into()),
@@ -493,6 +482,16 @@ impl FromWorld for ModelPipeline {
     }
 }
 
+#[derive(AsBindGroup, Component)]
+pub struct GpuModel {
+    #[uniform(0)]
+    pub num_layers: u32,
+    #[uniform(1)]
+    pub num_embd: u32,
+    #[uniform(2)]
+    pub num_vocab: u32,
+}
+
 pub struct GpuLayerNorm {
     pub w: BufferVec<Vec4>,
     pub b: BufferVec<Vec4>,
@@ -527,6 +526,7 @@ pub struct GpuFfn {
     pub w_r: BufferVec<UVec2>,
 }
 
+#[derive(Component)]
 pub struct GpuLayer {
     pub att_layer_norm: GpuLayerNorm,
     pub ffn_layer_norm: GpuLayerNorm,
@@ -543,7 +543,7 @@ pub struct GpuLayerState {
 }
 
 impl GpuLayerState {
-    pub fn new(device: &RenderDevice, model: &Model) -> Self {
+    pub fn new(device: &RenderDevice, model: &GpuModel) -> Self {
         let usages = BufferUsages::STORAGE | BufferUsages::COPY_DST;
         let mut att_x = BufferVec::new(usages);
         let mut att_a = BufferVec::new(usages);
@@ -594,7 +594,12 @@ pub struct GpuLayerBuffer {
 }
 
 impl GpuLayerBuffer {
-    pub fn new(device: &RenderDevice, queue: &RenderQueue, model: &Model, num_tokens: u32) -> Self {
+    pub fn new(
+        device: &RenderDevice,
+        queue: &RenderQueue,
+        model: &GpuModel,
+        num_tokens: u32,
+    ) -> Self {
         let usages = BufferUsages::STORAGE | BufferUsages::COPY_DST;
         let mut in_x = BufferVec::new(usages);
         let mut att_x = BufferVec::new(usages);

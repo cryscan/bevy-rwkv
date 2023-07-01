@@ -1,5 +1,6 @@
 @group(0) @binding(0) var<uniform> num_layers: u32;
 @group(0) @binding(1) var<uniform> num_embd: u32;
+@group(0) @binding(2) var<uniform> num_vocab: u32;
 
 @group(1) @binding(0) var<storage, read> x: array<vec4<f32>>;               // (T, C)
 @group(1) @binding(1) var<storage, read> r: array<vec4<f32>>;               // (T, C)

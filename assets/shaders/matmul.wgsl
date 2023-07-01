@@ -1,5 +1,6 @@
 @group(0) @binding(0) var<uniform> num_layers: u32;
 @group(0) @binding(1) var<uniform> num_embd: u32;
+@group(0) @binding(2) var<uniform> num_vocab: u32;
 
 @group(1) @binding(0) var<uniform> dims: vec2<u32>;                         // [C, R]
 @group(1) @binding(1) var<storage, read> matrix: array<vec2<u32>>;          // (R, C)

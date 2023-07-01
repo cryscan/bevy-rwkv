@@ -1,5 +1,5 @@
 @group(0) @binding(0) var<uniform> num_layers: u32;
-@group(0) @binding(1) var<uniform> num_embd: u32;
+@group(0) @binding(1) var<uniform> num_emb: u32;
 @group(0) @binding(2) var<uniform> num_vocab: u32;
 
 @group(1) @binding(0) var<uniform> num_tokens: u32;
@@ -24,7 +24,7 @@ const BLOCK_SIZE: u32 = 256u;
 @compute @workgroup_size(256, 1, 1)
 fn token_mix(@builtin(global_invocation_id) invocation_id: vec3<u32>) {
     let index = invocation_id.x;
-    let stride = num_embd / 4u;
+    let stride = num_emb / 4u;
 
     for (var t = 0u; t < num_tokens; t += 1u) {
         let ti = t * stride + index;

@@ -7,6 +7,8 @@ use bevy::{
     },
 };
 
+use crate::load::ModelAsset;
+
 pub struct ModelPlugin;
 
 impl Plugin for ModelPlugin {
@@ -18,6 +20,7 @@ impl Plugin for ModelPlugin {
 
 #[derive(Resource)]
 pub struct ModelPipeline {
+    pub embed_layout: BindGroupLayout,
     pub layer_norm_layout: BindGroupLayout,
     pub token_shift_layout: BindGroupLayout,
     pub matmul_layout: BindGroupLayout,
@@ -25,6 +28,7 @@ pub struct ModelPipeline {
     pub squared_relu_layout: BindGroupLayout,
     pub channel_mix_layout: BindGroupLayout,
 
+    pub embed_pipeline: CachedComputePipelineId,
     pub layer_norm_pipeline: CachedComputePipelineId,
     pub token_shift_pipeline: CachedComputePipelineId,
     pub matmul_pipeline: CachedComputePipelineId,
@@ -39,6 +43,44 @@ impl FromWorld for ModelPipeline {
         let asset_server = world.resource::<AssetServer>();
         let pipeline_cache = world.resource::<PipelineCache>();
 
+        let embed_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("embed_layout"),
+            entries: &[
+                // var<storage, read> tokens: array<u32>;
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: Some(u32::min_size()),
+                    },
+                    count: None,
+                },
+                // var<storage, read> w: array<vec2<u32>>;
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: Some(UVec2::min_size()),
+                    },
+                    count: None,
+                },
+                // var<storage, read_write> output;
+                BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: Some(Vec4::min_size()),
+                    },
+                    count: None,
+                },
+            ],
+        });
         let layer_norm_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("layer_norm_layout"),
             entries: &[
@@ -151,7 +193,7 @@ impl FromWorld for ModelPipeline {
                     },
                     count: None,
                 },
-                // var<storage, read> matrix: array<u32>;
+                // var<storage, read> matrix: array<vec2<u32>>;
                 BindGroupLayoutEntry {
                     binding: 1,
                     visibility: ShaderStages::COMPUTE,
@@ -412,6 +454,14 @@ impl FromWorld for ModelPipeline {
         });
 
         let model_layout = GpuModel::bind_group_layout(device);
+        let embed_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("embed_pipeline".into()),
+            layout: vec![model_layout.clone(), embed_layout.clone()],
+            push_constant_ranges: vec![],
+            shader: asset_server.load("shaders/embed.wgsl"),
+            shader_defs: vec![],
+            entry_point: "embed".into(),
+        });
         let layer_norm_pipeline =
             pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
                 label: Some("layer_norm_pipeline".into()),
@@ -466,12 +516,14 @@ impl FromWorld for ModelPipeline {
             });
 
         Self {
+            embed_layout,
             layer_norm_layout,
             token_shift_layout,
             matmul_layout,
             token_mix_layout,
             squared_relu_layout,
             channel_mix_layout,
+            embed_pipeline,
             layer_norm_pipeline,
             token_shift_pipeline,
             matmul_pipeline,
@@ -487,7 +539,7 @@ pub struct GpuModel {
     #[uniform(0)]
     pub num_layers: u32,
     #[uniform(1)]
-    pub num_embd: u32,
+    pub num_emb: u32,
     #[uniform(2)]
     pub num_vocab: u32,
 }
@@ -526,7 +578,6 @@ pub struct GpuFfn {
     pub w_r: BufferVec<UVec2>,
 }
 
-#[derive(Component)]
 pub struct GpuLayer {
     pub att_layer_norm: GpuLayerNorm,
     pub ffn_layer_norm: GpuLayerNorm,
@@ -543,7 +594,7 @@ pub struct GpuLayerState {
 }
 
 impl GpuLayerState {
-    pub fn new(device: &RenderDevice, model: &GpuModel) -> Self {
+    pub fn new(device: &RenderDevice, model: &ModelAsset) -> Self {
         let usages = BufferUsages::STORAGE | BufferUsages::COPY_DST;
         let mut att_x = BufferVec::new(usages);
         let mut att_a = BufferVec::new(usages);
@@ -551,7 +602,7 @@ impl GpuLayerState {
         let mut att_p = BufferVec::new(usages);
         let mut ffn_x = BufferVec::new(usages);
 
-        let size = model.num_embd as usize / 4;
+        let size = model.num_emb / 4;
         att_x.reserve(size, device);
         att_a.reserve(size, device);
         att_b.reserve(size, device);
@@ -568,9 +619,52 @@ impl GpuLayerState {
     }
 }
 
-pub struct GpuLayerBuffer {
-    pub num_tokens: UniformBuffer<u32>,
+#[derive(Component)]
+pub struct GpuLayers {
+    pub layers: Vec<GpuLayer>,
+    pub states: Vec<GpuLayerState>,
+}
 
+#[derive(Component)]
+pub struct GpuEmbed {
+    pub layer_norm: GpuLayerNorm,
+    pub w: BufferVec<UVec2>,
+}
+
+#[derive(Component)]
+pub struct GpuHead {
+    pub layer_norm: GpuLayerNorm,
+
+    pub dims: UniformBuffer<UVec2>,
+    pub w: BufferVec<UVec2>,
+}
+
+pub struct GpuInputBuffer {
+    pub num_tokens: UniformBuffer<u32>,
+    pub in_tokens: BufferVec<u32>,
+}
+
+impl GpuInputBuffer {
+    pub fn new(device: &RenderDevice, queue: &RenderQueue, tokens: Vec<u32>) -> Self {
+        let buffer_usage = BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC;
+        let mut in_tokens = BufferVec::new(buffer_usage);
+
+        for token in tokens.iter() {
+            in_tokens.push(*token);
+        }
+        in_tokens.write_buffer(device, queue);
+
+        let mut num_tokens = UniformBuffer::from(tokens.len() as u32);
+        num_tokens.write_buffer(device, queue);
+
+        Self {
+            num_tokens,
+            in_tokens,
+        }
+    }
+}
+
+pub struct GpuLayerBuffer {
     pub in_x: BufferVec<Vec4>,
 
     pub att_x: BufferVec<Vec4>,
@@ -594,33 +688,28 @@ pub struct GpuLayerBuffer {
 }
 
 impl GpuLayerBuffer {
-    pub fn new(
-        device: &RenderDevice,
-        queue: &RenderQueue,
-        model: &GpuModel,
-        num_tokens: u32,
-    ) -> Self {
-        let usages = BufferUsages::STORAGE | BufferUsages::COPY_DST;
-        let mut in_x = BufferVec::new(usages);
-        let mut att_x = BufferVec::new(usages);
-        let mut att_kx = BufferVec::new(usages);
-        let mut att_vx = BufferVec::new(usages);
-        let mut att_rx = BufferVec::new(usages);
-        let mut att_k = BufferVec::new(usages);
-        let mut att_v = BufferVec::new(usages);
-        let mut att_r = BufferVec::new(usages);
-        let mut att_w = BufferVec::new(usages);
-        let mut att_o = BufferVec::new(usages);
-        let mut ffn_x = BufferVec::new(usages);
-        let mut ffn_kx = BufferVec::new(usages);
-        let mut ffn_vx = BufferVec::new(usages);
-        let mut ffn_rx = BufferVec::new(usages);
-        let mut ffn_k = BufferVec::new(usages);
-        let mut ffn_v = BufferVec::new(usages);
-        let mut ffn_r = BufferVec::new(usages);
-        let mut ffn_o = BufferVec::new(usages);
+    pub fn new(device: &RenderDevice, model: &ModelAsset, num_tokens: usize) -> Self {
+        let buffer_usage = BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC;
+        let mut in_x = BufferVec::new(buffer_usage);
+        let mut att_x = BufferVec::new(buffer_usage);
+        let mut att_kx = BufferVec::new(buffer_usage);
+        let mut att_vx = BufferVec::new(buffer_usage);
+        let mut att_rx = BufferVec::new(buffer_usage);
+        let mut att_k = BufferVec::new(buffer_usage);
+        let mut att_v = BufferVec::new(buffer_usage);
+        let mut att_r = BufferVec::new(buffer_usage);
+        let mut att_w = BufferVec::new(buffer_usage);
+        let mut att_o = BufferVec::new(buffer_usage);
+        let mut ffn_x = BufferVec::new(buffer_usage);
+        let mut ffn_kx = BufferVec::new(buffer_usage);
+        let mut ffn_vx = BufferVec::new(buffer_usage);
+        let mut ffn_rx = BufferVec::new(buffer_usage);
+        let mut ffn_k = BufferVec::new(buffer_usage);
+        let mut ffn_v = BufferVec::new(buffer_usage);
+        let mut ffn_r = BufferVec::new(buffer_usage);
+        let mut ffn_o = BufferVec::new(buffer_usage);
 
-        let size = (num_tokens * model.num_embd) as usize / 4;
+        let size = num_tokens * model.num_emb / 4;
         for buffer in [
             &mut in_x,
             &mut att_x,
@@ -644,11 +733,7 @@ impl GpuLayerBuffer {
             buffer.reserve(size, device);
         }
 
-        let mut num_tokens = UniformBuffer::from(num_tokens);
-        num_tokens.write_buffer(device, queue);
-
         Self {
-            num_tokens,
             in_x,
             att_x,
             att_kx,
@@ -698,6 +783,7 @@ impl LayerBindGroup {
         pipeline: &ModelPipeline,
         layer: &GpuLayer,
         state: &GpuLayerState,
+        input: &GpuInputBuffer,
         buffer: &GpuLayerBuffer,
     ) -> Option<Self> {
         let att_layer_norm = device.create_bind_group(&BindGroupDescriptor {
@@ -860,7 +946,7 @@ impl LayerBindGroup {
             entries: &[
                 BindGroupEntry {
                     binding: 0,
-                    resource: buffer.num_tokens.binding()?,
+                    resource: input.num_tokens.binding()?,
                 },
                 BindGroupEntry {
                     binding: 1,
@@ -1123,5 +1209,164 @@ impl LayerBindGroup {
             ffn_matmul_r,
             ffn_channel_mix,
         })
+    }
+}
+
+pub struct GpuEmbedBuffer {
+    pub emb: BufferVec<Vec4>,
+    pub x: BufferVec<Vec4>,
+}
+
+impl GpuEmbedBuffer {
+    pub fn new(device: &RenderDevice, model: &ModelAsset, num_tokens: usize) -> Self {
+        let buffer_usage = BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC;
+        let mut emb = BufferVec::new(buffer_usage);
+        let mut x = BufferVec::new(buffer_usage);
+
+        let size = num_tokens * model.num_emb / 4;
+        emb.reserve(size, device);
+        x.reserve(size, device);
+
+        Self { emb, x }
+    }
+}
+
+pub struct EmbedBindGroup {
+    pub embed: BindGroup,
+    pub layer_norm: BindGroup,
+}
+
+impl EmbedBindGroup {
+    pub fn create(
+        device: &RenderDevice,
+        pipeline: &ModelPipeline,
+        embed: &GpuEmbed,
+        buffer: &GpuEmbedBuffer,
+        input: &GpuInputBuffer,
+    ) -> Option<Self> {
+        let layer_norm = device.create_bind_group(&BindGroupDescriptor {
+            label: None,
+            layout: &pipeline.layer_norm_layout,
+            entries: &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: buffer.emb.buffer()?.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: embed.layer_norm.w.buffer()?.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 2,
+                    resource: embed.layer_norm.b.buffer()?.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 3,
+                    resource: buffer.x.buffer()?.as_entire_binding(),
+                },
+            ],
+        });
+        let embed = device.create_bind_group(&BindGroupDescriptor {
+            label: None,
+            layout: &pipeline.embed_layout,
+            entries: &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: input.in_tokens.buffer()?.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: embed.w.buffer()?.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 2,
+                    resource: buffer.emb.buffer()?.as_entire_binding(),
+                },
+            ],
+        });
+
+        Some(Self { embed, layer_norm })
+    }
+}
+
+pub struct GpuHeadBuffer {
+    pub in_x: BufferVec<Vec4>,
+    pub x: BufferVec<Vec4>,
+    pub prob: BufferVec<Vec4>,
+}
+
+impl GpuHeadBuffer {
+    pub fn new(device: &RenderDevice, model: &ModelAsset, num_tokens: usize) -> Self {
+        let buffer_usage = BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC;
+        let mut in_x = BufferVec::new(buffer_usage);
+        let mut x = BufferVec::new(buffer_usage);
+        let mut prob = BufferVec::new(buffer_usage);
+
+        in_x.reserve(num_tokens * model.num_emb / 4, device);
+        x.reserve(num_tokens * model.num_emb / 4, device);
+        prob.reserve(num_tokens * model.num_vocab / 4, device);
+
+        Self { in_x, x, prob }
+    }
+}
+
+pub struct HeadBindGroup {
+    pub layer_norm: BindGroup,
+    pub matmul: BindGroup,
+}
+
+impl HeadBindGroup {
+    pub fn create(
+        device: &RenderDevice,
+        pipeline: &ModelPipeline,
+        head: &GpuHead,
+        buffer: &GpuHeadBuffer,
+    ) -> Option<Self> {
+        let layer_norm = device.create_bind_group(&BindGroupDescriptor {
+            label: None,
+            layout: &pipeline.layer_norm_layout,
+            entries: &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: buffer.in_x.buffer()?.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: head.layer_norm.w.buffer()?.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 2,
+                    resource: head.layer_norm.b.buffer()?.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 3,
+                    resource: buffer.x.buffer()?.as_entire_binding(),
+                },
+            ],
+        });
+        let matmul = device.create_bind_group(&BindGroupDescriptor {
+            label: None,
+            layout: &pipeline.matmul_layout,
+            entries: &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: head.dims.binding()?,
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: head.w.buffer()?.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 2,
+                    resource: buffer.x.buffer()?.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 3,
+                    resource: buffer.prob.buffer()?.as_entire_binding(),
+                },
+            ],
+        });
+
+        Some(Self { layer_norm, matmul })
     }
 }

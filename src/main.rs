@@ -1,10 +1,10 @@
 use bevy::prelude::*;
 
-pub mod load;
+pub mod execute;
 pub mod model;
+pub mod tokenizer;
 
-use load::{LoadPlugin, Model};
-use model::ModelPlugin;
+use model::{Model, ModelPlugin};
 
 #[derive(Resource, Default)]
 struct State {
@@ -16,7 +16,6 @@ fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
         .add_plugin(ModelPlugin)
-        .add_plugin(LoadPlugin)
         .init_resource::<State>()
         .add_startup_system(setup)
         .add_system(print_on_load)

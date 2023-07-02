@@ -1,11 +1,14 @@
 use bevy::{
+    ecs::system::{lifetimeless::SRes, SystemParamItem},
     prelude::*,
     render::{
+        render_asset::{PrepareAssetError, RenderAsset, RenderAssetPlugin},
         render_resource::*,
         renderer::{RenderDevice, RenderQueue},
         RenderApp,
     },
 };
+use bytemuck::cast_slice;
 
 use crate::load::ModelAsset;
 
@@ -13,6 +16,7 @@ pub struct ModelPlugin;
 
 impl Plugin for ModelPlugin {
     fn build(&self, app: &mut App) {
+        app.add_plugin(RenderAssetPlugin::<ModelAsset>::default());
         let render_app = app.sub_app_mut(RenderApp);
         render_app.init_resource::<ModelPipeline>();
     }
@@ -534,7 +538,7 @@ impl FromWorld for ModelPipeline {
     }
 }
 
-#[derive(AsBindGroup, Component)]
+#[derive(AsBindGroup)]
 pub struct GpuModel {
     #[uniform(0)]
     pub num_layers: u32,
@@ -545,37 +549,37 @@ pub struct GpuModel {
 }
 
 pub struct GpuLayerNorm {
-    pub w: BufferVec<Vec4>,
-    pub b: BufferVec<Vec4>,
+    pub w: Buffer,
+    pub b: Buffer,
 }
 
 pub struct GpuAtt {
-    pub time_decay: BufferVec<Vec4>,
-    pub time_first: BufferVec<Vec4>,
+    pub time_decay: Buffer,
+    pub time_first: Buffer,
 
-    pub time_mix_k: BufferVec<Vec4>,
-    pub time_mix_v: BufferVec<Vec4>,
-    pub time_mix_r: BufferVec<Vec4>,
+    pub time_mix_k: Buffer,
+    pub time_mix_v: Buffer,
+    pub time_mix_r: Buffer,
 
     pub dims: UniformBuffer<UVec2>,
 
-    pub w_k: BufferVec<UVec2>,
-    pub w_v: BufferVec<UVec2>,
-    pub w_r: BufferVec<UVec2>,
-    pub w_o: BufferVec<UVec2>,
+    pub w_k: Buffer,
+    pub w_v: Buffer,
+    pub w_r: Buffer,
+    pub w_o: Buffer,
 }
 
 pub struct GpuFfn {
-    pub time_mix_k: BufferVec<Vec4>,
-    pub time_mix_r: BufferVec<Vec4>,
+    pub time_mix_k: Buffer,
+    pub time_mix_r: Buffer,
 
     pub dims_k: UniformBuffer<UVec2>,
     pub dims_v: UniformBuffer<UVec2>,
     pub dims_r: UniformBuffer<UVec2>,
 
-    pub w_k: BufferVec<UVec2>,
-    pub w_v: BufferVec<UVec2>,
-    pub w_r: BufferVec<UVec2>,
+    pub w_k: Buffer,
+    pub w_v: Buffer,
+    pub w_r: Buffer,
 }
 
 pub struct GpuLayer {
@@ -586,172 +590,125 @@ pub struct GpuLayer {
 }
 
 pub struct GpuLayerState {
-    pub att_x: BufferVec<Vec4>,
-    pub att_a: BufferVec<Vec4>,
-    pub att_b: BufferVec<Vec4>,
-    pub att_p: BufferVec<Vec4>,
-    pub ffn_x: BufferVec<Vec4>,
+    pub att_x: Buffer,
+    pub att_a: Buffer,
+    pub att_b: Buffer,
+    pub att_p: Buffer,
+    pub ffn_x: Buffer,
 }
 
 impl GpuLayerState {
     pub fn new(device: &RenderDevice, model: &ModelAsset) -> Self {
-        let usages = BufferUsages::STORAGE | BufferUsages::COPY_DST;
-        let mut att_x = BufferVec::new(usages);
-        let mut att_a = BufferVec::new(usages);
-        let mut att_b = BufferVec::new(usages);
-        let mut att_p = BufferVec::new(usages);
-        let mut ffn_x = BufferVec::new(usages);
-
-        let size = model.num_emb / 4;
-        att_x.reserve(size, device);
-        att_a.reserve(size, device);
-        att_b.reserve(size, device);
-        att_p.reserve(size, device);
-        ffn_x.reserve(size, device);
-
+        let create_buffer = |value: f32| {
+            let size = model.num_emb / 4;
+            let data = vec![value; size];
+            device.create_buffer_with_data(&BufferInitDescriptor {
+                label: None,
+                contents: cast_slice(&data),
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+            })
+        };
         Self {
-            att_x,
-            att_a,
-            att_b,
-            att_p,
-            ffn_x,
+            att_x: create_buffer(0.0),
+            att_a: create_buffer(0.0),
+            att_b: create_buffer(0.0),
+            att_p: create_buffer(-1.0e30),
+            ffn_x: create_buffer(0.0),
         }
     }
 }
 
-#[derive(Component)]
-pub struct GpuLayers {
-    pub layers: Vec<GpuLayer>,
-    pub states: Vec<GpuLayerState>,
-}
+#[derive(Deref, DerefMut)]
+pub struct GpuLayers(Vec<GpuLayer>);
 
-#[derive(Component)]
+#[derive(Deref, DerefMut)]
+pub struct GpuStates(Vec<GpuLayerState>);
+
 pub struct GpuEmbed {
     pub layer_norm: GpuLayerNorm,
-    pub w: BufferVec<UVec2>,
+    pub w: Buffer,
 }
 
-#[derive(Component)]
 pub struct GpuHead {
     pub layer_norm: GpuLayerNorm,
 
     pub dims: UniformBuffer<UVec2>,
-    pub w: BufferVec<UVec2>,
+    pub w: Buffer,
 }
 
 pub struct GpuInputBuffer {
     pub num_tokens: UniformBuffer<u32>,
-    pub in_tokens: BufferVec<u32>,
+    pub tokens: Buffer,
 }
 
 impl GpuInputBuffer {
-    pub fn new(device: &RenderDevice, queue: &RenderQueue, tokens: Vec<u32>) -> Self {
-        let buffer_usage = BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC;
-        let mut in_tokens = BufferVec::new(buffer_usage);
-
-        for token in tokens.iter() {
-            in_tokens.push(*token);
-        }
-        in_tokens.write_buffer(device, queue);
-
-        let mut num_tokens = UniformBuffer::from(tokens.len() as u32);
+    pub fn new(device: &RenderDevice, queue: &RenderQueue, inputs: Vec<u32>) -> Self {
+        let mut num_tokens = UniformBuffer::from(inputs.len() as u32);
         num_tokens.write_buffer(device, queue);
 
-        Self {
-            num_tokens,
-            in_tokens,
-        }
+        let tokens = device.create_buffer_with_data(&BufferInitDescriptor {
+            label: None,
+            contents: cast_slice(&inputs),
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+        });
+
+        Self { num_tokens, tokens }
     }
 }
 
 pub struct GpuLayerBuffer {
-    pub in_x: BufferVec<Vec4>,
+    pub in_x: Buffer,
 
-    pub att_x: BufferVec<Vec4>,
-    pub att_kx: BufferVec<Vec4>,
-    pub att_vx: BufferVec<Vec4>,
-    pub att_rx: BufferVec<Vec4>,
-    pub att_k: BufferVec<Vec4>, // mul(w_k, att_kx)
-    pub att_v: BufferVec<Vec4>, // mul(w_v, att_vx)
-    pub att_r: BufferVec<Vec4>, // mul(w_r, att_rx)
-    pub att_w: BufferVec<Vec4>, // token_mix
-    pub att_o: BufferVec<Vec4>, // mul(w_o, att_w)
+    pub att_x: Buffer,
+    pub att_kx: Buffer,
+    pub att_vx: Buffer,
+    pub att_rx: Buffer,
+    pub att_k: Buffer, // mul(w_k, att_kx)
+    pub att_v: Buffer, // mul(w_v, att_vx)
+    pub att_r: Buffer, // mul(w_r, att_rx)
+    pub att_w: Buffer, // token_mix
+    pub att_o: Buffer, // mul(w_o, att_w)
 
-    pub ffn_x: BufferVec<Vec4>,
-    pub ffn_kx: BufferVec<Vec4>,
-    pub ffn_vx: BufferVec<Vec4>, // squared_relu(ffn_k)
-    pub ffn_rx: BufferVec<Vec4>,
-    pub ffn_k: BufferVec<Vec4>, // mul(w_k, ffn_kx)
-    pub ffn_v: BufferVec<Vec4>, // mul(w_v, ffn_vx)
-    pub ffn_r: BufferVec<Vec4>, // mul(w_r, ffn_rx)
-    pub ffn_o: BufferVec<Vec4>, // channel_mix
+    pub ffn_x: Buffer,
+    pub ffn_kx: Buffer,
+    pub ffn_vx: Buffer, // squared_relu(ffn_k)
+    pub ffn_rx: Buffer,
+    pub ffn_k: Buffer, // mul(w_k, ffn_kx)
+    pub ffn_v: Buffer, // mul(w_v, ffn_vx)
+    pub ffn_r: Buffer, // mul(w_r, ffn_rx)
+    pub ffn_o: Buffer, // channel_mix
 }
 
 impl GpuLayerBuffer {
     pub fn new(device: &RenderDevice, model: &ModelAsset, num_tokens: usize) -> Self {
-        let buffer_usage = BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC;
-        let mut in_x = BufferVec::new(buffer_usage);
-        let mut att_x = BufferVec::new(buffer_usage);
-        let mut att_kx = BufferVec::new(buffer_usage);
-        let mut att_vx = BufferVec::new(buffer_usage);
-        let mut att_rx = BufferVec::new(buffer_usage);
-        let mut att_k = BufferVec::new(buffer_usage);
-        let mut att_v = BufferVec::new(buffer_usage);
-        let mut att_r = BufferVec::new(buffer_usage);
-        let mut att_w = BufferVec::new(buffer_usage);
-        let mut att_o = BufferVec::new(buffer_usage);
-        let mut ffn_x = BufferVec::new(buffer_usage);
-        let mut ffn_kx = BufferVec::new(buffer_usage);
-        let mut ffn_vx = BufferVec::new(buffer_usage);
-        let mut ffn_rx = BufferVec::new(buffer_usage);
-        let mut ffn_k = BufferVec::new(buffer_usage);
-        let mut ffn_v = BufferVec::new(buffer_usage);
-        let mut ffn_r = BufferVec::new(buffer_usage);
-        let mut ffn_o = BufferVec::new(buffer_usage);
-
         let size = num_tokens * model.num_emb / 4;
-        for buffer in [
-            &mut in_x,
-            &mut att_x,
-            &mut att_kx,
-            &mut att_vx,
-            &mut att_rx,
-            &mut att_k,
-            &mut att_v,
-            &mut att_r,
-            &mut att_w,
-            &mut att_o,
-            &mut ffn_x,
-            &mut ffn_kx,
-            &mut ffn_vx,
-            &mut ffn_rx,
-            &mut ffn_k,
-            &mut ffn_v,
-            &mut ffn_r,
-            &mut ffn_o,
-        ] {
-            buffer.reserve(size, device);
-        }
-
+        let data = vec![0.0f32; size];
+        let create_buffer = || {
+            device.create_buffer_with_data(&BufferInitDescriptor {
+                label: None,
+                contents: cast_slice(&data),
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+            })
+        };
         Self {
-            in_x,
-            att_x,
-            att_kx,
-            att_vx,
-            att_rx,
-            att_k,
-            att_v,
-            att_r,
-            att_w,
-            att_o,
-            ffn_x,
-            ffn_kx,
-            ffn_vx,
-            ffn_rx,
-            ffn_k,
-            ffn_v,
-            ffn_r,
-            ffn_o,
+            in_x: create_buffer(),
+            att_x: create_buffer(),
+            att_kx: create_buffer(),
+            att_vx: create_buffer(),
+            att_rx: create_buffer(),
+            att_k: create_buffer(),
+            att_v: create_buffer(),
+            att_r: create_buffer(),
+            att_w: create_buffer(),
+            att_o: create_buffer(),
+            ffn_x: create_buffer(),
+            ffn_kx: create_buffer(),
+            ffn_vx: create_buffer(),
+            ffn_rx: create_buffer(),
+            ffn_k: create_buffer(),
+            ffn_v: create_buffer(),
+            ffn_r: create_buffer(),
+            ffn_o: create_buffer(),
         }
     }
 }
@@ -792,19 +749,19 @@ impl LayerBindGroup {
             entries: &[
                 BindGroupEntry {
                     binding: 0,
-                    resource: buffer.in_x.buffer()?.as_entire_binding(),
+                    resource: buffer.in_x.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 1,
-                    resource: layer.att_layer_norm.w.buffer()?.as_entire_binding(),
+                    resource: layer.att_layer_norm.w.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 2,
-                    resource: layer.att_layer_norm.b.buffer()?.as_entire_binding(),
+                    resource: layer.att_layer_norm.b.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 3,
-                    resource: buffer.att_x.buffer()?.as_entire_binding(),
+                    resource: buffer.att_x.as_entire_binding(),
                 },
             ],
         });
@@ -814,19 +771,19 @@ impl LayerBindGroup {
             entries: &[
                 BindGroupEntry {
                     binding: 0,
-                    resource: layer.att.time_mix_k.buffer()?.as_entire_binding(),
+                    resource: layer.att.time_mix_k.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 1,
-                    resource: buffer.att_x.buffer()?.as_entire_binding(),
+                    resource: buffer.att_x.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 2,
-                    resource: state.att_x.buffer()?.as_entire_binding(),
+                    resource: state.att_x.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 3,
-                    resource: buffer.att_kx.buffer()?.as_entire_binding(),
+                    resource: buffer.att_kx.as_entire_binding(),
                 },
             ],
         });
@@ -836,19 +793,19 @@ impl LayerBindGroup {
             entries: &[
                 BindGroupEntry {
                     binding: 0,
-                    resource: layer.att.time_mix_v.buffer()?.as_entire_binding(),
+                    resource: layer.att.time_mix_v.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 1,
-                    resource: buffer.att_x.buffer()?.as_entire_binding(),
+                    resource: buffer.att_x.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 2,
-                    resource: state.att_x.buffer()?.as_entire_binding(),
+                    resource: state.att_x.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 3,
-                    resource: buffer.att_vx.buffer()?.as_entire_binding(),
+                    resource: buffer.att_vx.as_entire_binding(),
                 },
             ],
         });
@@ -858,19 +815,19 @@ impl LayerBindGroup {
             entries: &[
                 BindGroupEntry {
                     binding: 0,
-                    resource: layer.att.time_mix_r.buffer()?.as_entire_binding(),
+                    resource: layer.att.time_mix_r.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 1,
-                    resource: buffer.att_x.buffer()?.as_entire_binding(),
+                    resource: buffer.att_x.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 2,
-                    resource: state.att_x.buffer()?.as_entire_binding(),
+                    resource: state.att_x.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 3,
-                    resource: buffer.att_rx.buffer()?.as_entire_binding(),
+                    resource: buffer.att_rx.as_entire_binding(),
                 },
             ],
         });
@@ -884,15 +841,15 @@ impl LayerBindGroup {
                 },
                 BindGroupEntry {
                     binding: 1,
-                    resource: layer.att.w_k.buffer()?.as_entire_binding(),
+                    resource: layer.att.w_k.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 2,
-                    resource: buffer.att_kx.buffer()?.as_entire_binding(),
+                    resource: buffer.att_kx.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 3,
-                    resource: buffer.att_k.buffer()?.as_entire_binding(),
+                    resource: buffer.att_k.as_entire_binding(),
                 },
             ],
         });
@@ -906,15 +863,15 @@ impl LayerBindGroup {
                 },
                 BindGroupEntry {
                     binding: 1,
-                    resource: layer.att.w_v.buffer()?.as_entire_binding(),
+                    resource: layer.att.w_v.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 2,
-                    resource: buffer.att_vx.buffer()?.as_entire_binding(),
+                    resource: buffer.att_vx.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 3,
-                    resource: buffer.att_v.buffer()?.as_entire_binding(),
+                    resource: buffer.att_v.as_entire_binding(),
                 },
             ],
         });
@@ -928,15 +885,15 @@ impl LayerBindGroup {
                 },
                 BindGroupEntry {
                     binding: 1,
-                    resource: layer.att.w_r.buffer()?.as_entire_binding(),
+                    resource: layer.att.w_r.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 2,
-                    resource: buffer.att_rx.buffer()?.as_entire_binding(),
+                    resource: buffer.att_rx.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 3,
-                    resource: buffer.att_r.buffer()?.as_entire_binding(),
+                    resource: buffer.att_r.as_entire_binding(),
                 },
             ],
         });
@@ -950,47 +907,47 @@ impl LayerBindGroup {
                 },
                 BindGroupEntry {
                     binding: 1,
-                    resource: layer.att.time_decay.buffer()?.as_entire_binding(),
+                    resource: layer.att.time_decay.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 2,
-                    resource: layer.att.time_first.buffer()?.as_entire_binding(),
+                    resource: layer.att.time_first.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 3,
-                    resource: buffer.att_x.buffer()?.as_entire_binding(),
+                    resource: buffer.att_x.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 4,
-                    resource: buffer.att_k.buffer()?.as_entire_binding(),
+                    resource: buffer.att_k.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 5,
-                    resource: buffer.att_v.buffer()?.as_entire_binding(),
+                    resource: buffer.att_v.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 6,
-                    resource: buffer.att_r.buffer()?.as_entire_binding(),
+                    resource: buffer.att_r.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 7,
-                    resource: state.att_a.buffer()?.as_entire_binding(),
+                    resource: state.att_a.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 8,
-                    resource: state.att_b.buffer()?.as_entire_binding(),
+                    resource: state.att_b.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 9,
-                    resource: state.att_p.buffer()?.as_entire_binding(),
+                    resource: state.att_p.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 10,
-                    resource: state.att_x.buffer()?.as_entire_binding(),
+                    resource: state.att_x.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 11,
-                    resource: buffer.att_w.buffer()?.as_entire_binding(),
+                    resource: buffer.att_w.as_entire_binding(),
                 },
             ],
         });
@@ -1004,15 +961,15 @@ impl LayerBindGroup {
                 },
                 BindGroupEntry {
                     binding: 1,
-                    resource: layer.att.w_o.buffer()?.as_entire_binding(),
+                    resource: layer.att.w_o.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 2,
-                    resource: buffer.att_w.buffer()?.as_entire_binding(),
+                    resource: buffer.att_w.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 3,
-                    resource: buffer.att_o.buffer()?.as_entire_binding(),
+                    resource: buffer.att_o.as_entire_binding(),
                 },
             ],
         });
@@ -1023,19 +980,19 @@ impl LayerBindGroup {
             entries: &[
                 BindGroupEntry {
                     binding: 0,
-                    resource: buffer.att_o.buffer()?.as_entire_binding(),
+                    resource: buffer.att_o.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 1,
-                    resource: layer.ffn_layer_norm.w.buffer()?.as_entire_binding(),
+                    resource: layer.ffn_layer_norm.w.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 2,
-                    resource: layer.ffn_layer_norm.b.buffer()?.as_entire_binding(),
+                    resource: layer.ffn_layer_norm.b.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 3,
-                    resource: buffer.ffn_x.buffer()?.as_entire_binding(),
+                    resource: buffer.ffn_x.as_entire_binding(),
                 },
             ],
         });
@@ -1045,19 +1002,19 @@ impl LayerBindGroup {
             entries: &[
                 BindGroupEntry {
                     binding: 0,
-                    resource: layer.ffn.time_mix_k.buffer()?.as_entire_binding(),
+                    resource: layer.ffn.time_mix_k.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 1,
-                    resource: buffer.ffn_x.buffer()?.as_entire_binding(),
+                    resource: buffer.ffn_x.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 2,
-                    resource: state.ffn_x.buffer()?.as_entire_binding(),
+                    resource: state.ffn_x.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 3,
-                    resource: buffer.ffn_kx.buffer()?.as_entire_binding(),
+                    resource: buffer.ffn_kx.as_entire_binding(),
                 },
             ],
         });
@@ -1067,19 +1024,19 @@ impl LayerBindGroup {
             entries: &[
                 BindGroupEntry {
                     binding: 0,
-                    resource: layer.ffn.time_mix_r.buffer()?.as_entire_binding(),
+                    resource: layer.ffn.time_mix_r.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 1,
-                    resource: buffer.ffn_x.buffer()?.as_entire_binding(),
+                    resource: buffer.ffn_x.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 2,
-                    resource: state.ffn_x.buffer()?.as_entire_binding(),
+                    resource: state.ffn_x.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 3,
-                    resource: buffer.ffn_rx.buffer()?.as_entire_binding(),
+                    resource: buffer.ffn_rx.as_entire_binding(),
                 },
             ],
         });
@@ -1093,15 +1050,15 @@ impl LayerBindGroup {
                 },
                 BindGroupEntry {
                     binding: 1,
-                    resource: layer.ffn.w_k.buffer()?.as_entire_binding(),
+                    resource: layer.ffn.w_k.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 2,
-                    resource: buffer.ffn_kx.buffer()?.as_entire_binding(),
+                    resource: buffer.ffn_kx.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 3,
-                    resource: buffer.ffn_k.buffer()?.as_entire_binding(),
+                    resource: buffer.ffn_k.as_entire_binding(),
                 },
             ],
         });
@@ -1111,11 +1068,11 @@ impl LayerBindGroup {
             entries: &[
                 BindGroupEntry {
                     binding: 0,
-                    resource: buffer.ffn_k.buffer()?.as_entire_binding(),
+                    resource: buffer.ffn_k.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 1,
-                    resource: buffer.ffn_vx.buffer()?.as_entire_binding(),
+                    resource: buffer.ffn_vx.as_entire_binding(),
                 },
             ],
         });
@@ -1129,15 +1086,15 @@ impl LayerBindGroup {
                 },
                 BindGroupEntry {
                     binding: 1,
-                    resource: layer.ffn.w_v.buffer()?.as_entire_binding(),
+                    resource: layer.ffn.w_v.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 2,
-                    resource: buffer.ffn_vx.buffer()?.as_entire_binding(),
+                    resource: buffer.ffn_vx.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 3,
-                    resource: buffer.ffn_v.buffer()?.as_entire_binding(),
+                    resource: buffer.ffn_v.as_entire_binding(),
                 },
             ],
         });
@@ -1151,15 +1108,15 @@ impl LayerBindGroup {
                 },
                 BindGroupEntry {
                     binding: 1,
-                    resource: layer.ffn.w_r.buffer()?.as_entire_binding(),
+                    resource: layer.ffn.w_r.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 2,
-                    resource: buffer.ffn_rx.buffer()?.as_entire_binding(),
+                    resource: buffer.ffn_rx.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 3,
-                    resource: buffer.ffn_r.buffer()?.as_entire_binding(),
+                    resource: buffer.ffn_r.as_entire_binding(),
                 },
             ],
         });
@@ -1169,23 +1126,23 @@ impl LayerBindGroup {
             entries: &[
                 BindGroupEntry {
                     binding: 0,
-                    resource: buffer.ffn_x.buffer()?.as_entire_binding(),
+                    resource: buffer.ffn_x.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 1,
-                    resource: buffer.ffn_r.buffer()?.as_entire_binding(),
+                    resource: buffer.ffn_r.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 2,
-                    resource: buffer.ffn_v.buffer()?.as_entire_binding(),
+                    resource: buffer.ffn_v.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 3,
-                    resource: state.ffn_x.buffer()?.as_entire_binding(),
+                    resource: state.ffn_x.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 4,
-                    resource: buffer.ffn_o.buffer()?.as_entire_binding(),
+                    resource: buffer.ffn_o.as_entire_binding(),
                 },
             ],
         });
@@ -1213,21 +1170,25 @@ impl LayerBindGroup {
 }
 
 pub struct GpuEmbedBuffer {
-    pub emb: BufferVec<Vec4>,
-    pub x: BufferVec<Vec4>,
+    pub emb: Buffer,
+    pub x: Buffer,
 }
 
 impl GpuEmbedBuffer {
     pub fn new(device: &RenderDevice, model: &ModelAsset, num_tokens: usize) -> Self {
-        let buffer_usage = BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC;
-        let mut emb = BufferVec::new(buffer_usage);
-        let mut x = BufferVec::new(buffer_usage);
-
         let size = num_tokens * model.num_emb / 4;
-        emb.reserve(size, device);
-        x.reserve(size, device);
-
-        Self { emb, x }
+        let data = vec![0.0f32; size];
+        let create_buffer = || {
+            device.create_buffer_with_data(&BufferInitDescriptor {
+                label: None,
+                contents: cast_slice(&data),
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+            })
+        };
+        Self {
+            emb: create_buffer(),
+            x: create_buffer(),
+        }
     }
 }
 
@@ -1250,19 +1211,19 @@ impl EmbedBindGroup {
             entries: &[
                 BindGroupEntry {
                     binding: 0,
-                    resource: buffer.emb.buffer()?.as_entire_binding(),
+                    resource: buffer.emb.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 1,
-                    resource: embed.layer_norm.w.buffer()?.as_entire_binding(),
+                    resource: embed.layer_norm.w.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 2,
-                    resource: embed.layer_norm.b.buffer()?.as_entire_binding(),
+                    resource: embed.layer_norm.b.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 3,
-                    resource: buffer.x.buffer()?.as_entire_binding(),
+                    resource: buffer.x.as_entire_binding(),
                 },
             ],
         });
@@ -1272,15 +1233,15 @@ impl EmbedBindGroup {
             entries: &[
                 BindGroupEntry {
                     binding: 0,
-                    resource: input.in_tokens.buffer()?.as_entire_binding(),
+                    resource: input.tokens.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 1,
-                    resource: embed.w.buffer()?.as_entire_binding(),
+                    resource: embed.w.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 2,
-                    resource: buffer.emb.buffer()?.as_entire_binding(),
+                    resource: buffer.emb.as_entire_binding(),
                 },
             ],
         });
@@ -1290,23 +1251,27 @@ impl EmbedBindGroup {
 }
 
 pub struct GpuHeadBuffer {
-    pub in_x: BufferVec<Vec4>,
-    pub x: BufferVec<Vec4>,
-    pub prob: BufferVec<Vec4>,
+    pub in_x: Buffer,
+    pub x: Buffer,
+    pub prob: Buffer,
 }
 
 impl GpuHeadBuffer {
     pub fn new(device: &RenderDevice, model: &ModelAsset, num_tokens: usize) -> Self {
-        let buffer_usage = BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC;
-        let mut in_x = BufferVec::new(buffer_usage);
-        let mut x = BufferVec::new(buffer_usage);
-        let mut prob = BufferVec::new(buffer_usage);
-
-        in_x.reserve(num_tokens * model.num_emb / 4, device);
-        x.reserve(num_tokens * model.num_emb / 4, device);
-        prob.reserve(num_tokens * model.num_vocab / 4, device);
-
-        Self { in_x, x, prob }
+        let size = num_tokens * model.num_emb / 4;
+        let data = vec![0.0f32; size];
+        let create_buffer = || {
+            device.create_buffer_with_data(&BufferInitDescriptor {
+                label: None,
+                contents: cast_slice(&data),
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+            })
+        };
+        Self {
+            in_x: create_buffer(),
+            x: create_buffer(),
+            prob: create_buffer(),
+        }
     }
 }
 
@@ -1328,19 +1293,19 @@ impl HeadBindGroup {
             entries: &[
                 BindGroupEntry {
                     binding: 0,
-                    resource: buffer.in_x.buffer()?.as_entire_binding(),
+                    resource: buffer.in_x.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 1,
-                    resource: head.layer_norm.w.buffer()?.as_entire_binding(),
+                    resource: head.layer_norm.w.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 2,
-                    resource: head.layer_norm.b.buffer()?.as_entire_binding(),
+                    resource: head.layer_norm.b.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 3,
-                    resource: buffer.x.buffer()?.as_entire_binding(),
+                    resource: buffer.x.as_entire_binding(),
                 },
             ],
         });
@@ -1354,19 +1319,142 @@ impl HeadBindGroup {
                 },
                 BindGroupEntry {
                     binding: 1,
-                    resource: head.w.buffer()?.as_entire_binding(),
+                    resource: head.w.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 2,
-                    resource: buffer.x.buffer()?.as_entire_binding(),
+                    resource: buffer.x.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 3,
-                    resource: buffer.prob.buffer()?.as_entire_binding(),
+                    resource: buffer.prob.as_entire_binding(),
                 },
             ],
         });
 
         Some(Self { layer_norm, matmul })
+    }
+}
+
+impl RenderAsset for ModelAsset {
+    type ExtractedAsset = Self;
+    type PreparedAsset = (GpuModel, GpuEmbed, GpuHead, GpuLayers);
+    type Param = (SRes<RenderDevice>, SRes<RenderQueue>);
+
+    fn extract_asset(&self) -> Self::ExtractedAsset {
+        self.clone()
+    }
+
+    fn prepare_asset(
+        asset: Self::ExtractedAsset,
+        (device, queue): &mut SystemParamItem<Self::Param>,
+    ) -> Result<Self::PreparedAsset, PrepareAssetError<Self::ExtractedAsset>> {
+        let Self {
+            num_layers,
+            num_emb,
+            num_vocab,
+            tensors,
+        } = asset;
+
+        let num_layers = num_layers as u32;
+        let num_emb = num_emb as u32;
+        let num_vocab = num_vocab as u32;
+
+        let model = GpuModel {
+            num_layers,
+            num_emb,
+            num_vocab,
+        };
+
+        let create_buffer = |data| {
+            device.create_buffer_with_data(&BufferInitDescriptor {
+                label: None,
+                contents: data,
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+            })
+        };
+
+        let embed = GpuEmbed {
+            layer_norm: GpuLayerNorm {
+                w: create_buffer(cast_slice(&tensors.embed.layer_norm.w)),
+                b: create_buffer(cast_slice(&tensors.embed.layer_norm.b)),
+            },
+            w: create_buffer(cast_slice(&tensors.embed.w)),
+        };
+
+        let head = {
+            let mut dims = UniformBuffer::from(UVec2::new(num_emb, num_vocab));
+            dims.write_buffer(device, queue);
+
+            GpuHead {
+                layer_norm: GpuLayerNorm {
+                    w: create_buffer(cast_slice(&tensors.head.layer_norm.w)),
+                    b: create_buffer(cast_slice(&tensors.head.layer_norm.b)),
+                },
+                dims,
+                w: create_buffer(cast_slice(&tensors.head.w)),
+            }
+        };
+
+        let layers = {
+            let layers: Vec<GpuLayer> = tensors
+                .layers
+                .iter()
+                .map(|layer| {
+                    let att_layer_norm = GpuLayerNorm {
+                        w: create_buffer(cast_slice(&layer.att_layer_norm.w)),
+                        b: create_buffer(cast_slice(&layer.att_layer_norm.b)),
+                    };
+
+                    let ffn_layer_norm = GpuLayerNorm {
+                        w: create_buffer(cast_slice(&layer.ffn_layer_norm.w)),
+                        b: create_buffer(cast_slice(&layer.ffn_layer_norm.b)),
+                    };
+
+                    let mut dims = UniformBuffer::from(UVec2::new(num_emb, num_emb));
+                    dims.write_buffer(device, queue);
+                    let att = GpuAtt {
+                        time_decay: create_buffer(cast_slice(&layer.att.time_decay)),
+                        time_first: create_buffer(cast_slice(&layer.att.time_first)),
+                        time_mix_k: create_buffer(cast_slice(&layer.att.time_mix_k)),
+                        time_mix_v: create_buffer(cast_slice(&layer.att.time_mix_v)),
+                        time_mix_r: create_buffer(cast_slice(&layer.att.time_mix_r)),
+                        dims,
+                        w_k: create_buffer(cast_slice(&layer.att.w_k)),
+                        w_v: create_buffer(cast_slice(&layer.att.w_v)),
+                        w_r: create_buffer(cast_slice(&layer.att.w_r)),
+                        w_o: create_buffer(cast_slice(&layer.att.w_o)),
+                    };
+
+                    let mut dims_k = UniformBuffer::from(UVec2::new(num_emb, 4 * num_emb));
+                    let mut dims_v = UniformBuffer::from(UVec2::new(4 * num_emb, num_emb));
+                    let mut dims_r = UniformBuffer::from(UVec2::new(num_emb, num_emb));
+                    dims_k.write_buffer(device, queue);
+                    dims_v.write_buffer(device, queue);
+                    dims_r.write_buffer(device, queue);
+                    let ffn = GpuFfn {
+                        time_mix_k: create_buffer(cast_slice(&layer.ffn.time_mix_k)),
+                        time_mix_r: create_buffer(cast_slice(&layer.ffn.time_mix_r)),
+                        dims_k,
+                        dims_v,
+                        dims_r,
+                        w_k: create_buffer(cast_slice(&layer.ffn.w_k)),
+                        w_v: create_buffer(cast_slice(&layer.ffn.w_v)),
+                        w_r: create_buffer(cast_slice(&layer.ffn.w_r)),
+                    };
+
+                    GpuLayer {
+                        att_layer_norm,
+                        ffn_layer_norm,
+                        att,
+                        ffn,
+                    }
+                })
+                .collect();
+
+            GpuLayers(layers)
+        };
+
+        Ok((model, embed, head, layers))
     }
 }

@@ -6,7 +6,7 @@ use bevy::{
 };
 use half::prelude::*;
 use safetensors::SafeTensors;
-use std::{fmt::Debug, vec};
+use std::{fmt::Debug, sync::Arc, vec};
 
 pub struct LoadPlugin;
 
@@ -23,7 +23,10 @@ pub struct ModelAsset {
     pub num_layers: usize,
     pub num_emb: usize,
     pub num_vocab: usize,
+    pub tensors: Arc<ModelTensors>,
+}
 
+pub struct ModelTensors {
     pub embed: Embed,
     pub head: Head,
     pub layers: Vec<Layer>,
@@ -39,13 +42,11 @@ impl Debug for ModelAsset {
     }
 }
 
-#[derive(Debug, Clone)]
 pub struct LayerNorm {
     pub w: Vec<f32>,
     pub b: Vec<f32>,
 }
 
-#[derive(Debug, Clone)]
 pub struct Att {
     pub time_decay: Vec<f32>,
     pub time_first: Vec<f32>,
@@ -60,7 +61,6 @@ pub struct Att {
     pub w_o: Vec<f16>,
 }
 
-#[derive(Debug, Clone)]
 pub struct Ffn {
     pub time_mix_k: Vec<f32>,
     pub time_mix_r: Vec<f32>,
@@ -70,7 +70,6 @@ pub struct Ffn {
     pub w_r: Vec<f16>,
 }
 
-#[derive(Debug, Clone)]
 pub struct Layer {
     pub att_layer_norm: LayerNorm,
     pub ffn_layer_norm: LayerNorm,
@@ -78,13 +77,11 @@ pub struct Layer {
     pub ffn: Ffn,
 }
 
-#[derive(Debug, Clone)]
 pub struct Embed {
     pub layer_norm: LayerNorm,
     pub w: Vec<f16>,
 }
 
-#[derive(Debug, Clone)]
 pub struct Head {
     pub layer_norm: LayerNorm,
     pub w: Vec<f16>,
@@ -189,13 +186,16 @@ impl AssetLoader for ModelAssetLoader {
                 });
             }
 
+            let tensors = Arc::new(ModelTensors {
+                embed,
+                head,
+                layers,
+            });
             load_context.set_default_asset(LoadedAsset::new(ModelAsset {
                 num_layers,
                 num_emb,
                 num_vocab,
-                embed,
-                head,
-                layers,
+                tensors,
             }));
             Ok(())
         })

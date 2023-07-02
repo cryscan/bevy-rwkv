@@ -12,14 +12,14 @@ pub struct LoadPlugin;
 
 impl Plugin for LoadPlugin {
     fn build(&self, app: &mut App) {
-        app.add_asset::<ModelAsset>()
+        app.add_asset::<Model>()
             .init_asset_loader::<ModelAssetLoader>();
     }
 }
 
 #[derive(Clone, TypeUuid)]
 #[uuid = "60412308-ec8b-4fde-aac3-2a87d4838ccc"]
-pub struct ModelAsset {
+pub struct Model {
     pub num_layers: usize,
     pub num_emb: usize,
     pub num_vocab: usize,
@@ -32,7 +32,7 @@ pub struct ModelTensors {
     pub layers: Vec<Layer>,
 }
 
-impl Debug for ModelAsset {
+impl Debug for Model {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ModelAsset")
             .field("num_layers", &self.num_layers)
@@ -191,7 +191,7 @@ impl AssetLoader for ModelAssetLoader {
                 head,
                 layers,
             });
-            load_context.set_default_asset(LoadedAsset::new(ModelAsset {
+            load_context.set_default_asset(LoadedAsset::new(Model {
                 num_layers,
                 num_emb,
                 num_vocab,

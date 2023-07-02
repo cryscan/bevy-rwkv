@@ -3,12 +3,12 @@ use bevy::prelude::*;
 pub mod load;
 pub mod model;
 
-use load::{LoadPlugin, ModelAsset};
+use load::{LoadPlugin, Model};
 use model::ModelPlugin;
 
 #[derive(Resource, Default)]
 struct State {
-    handle: Handle<ModelAsset>,
+    handle: Handle<Model>,
     printed: bool,
 }
 
@@ -27,11 +27,11 @@ fn setup(asset_server: Res<AssetServer>, mut state: ResMut<State>) {
     state.handle = asset_server.load("models/RWKV-4-World-0.4B-v1-20230529-ctx4096.st");
 }
 
-fn print_on_load(mut state: ResMut<State>, model_assets: Res<Assets<ModelAsset>>) {
+fn print_on_load(mut state: ResMut<State>, model_assets: Res<Assets<Model>>) {
     let asset = model_assets.get(&state.handle);
     if let Some(asset) = asset {
         if !state.printed {
-            info!("{:?}", asset);
+            info!("{:#?}", asset);
             state.printed = true;
         }
     }

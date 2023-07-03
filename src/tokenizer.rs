@@ -1,18 +1,42 @@
-use ahash::AHashMap as HashMap;
-use ahash::AHashSet as HashSet;
-use bevy::prelude::*;
+use ahash::{AHashMap as HashMap, AHashSet as HashSet};
+use bevy::{
+    asset::{AssetLoader, LoadContext, LoadedAsset},
+    prelude::*,
+    reflect::TypeUuid,
+    utils::BoxedFuture,
+};
 use std::collections::BTreeMap;
 
 pub struct TokenizerPlugin;
 
 impl Plugin for TokenizerPlugin {
-    fn build(&self, _app: &mut App) {
-        todo!()
+    fn build(&self, app: &mut App) {
+        app.add_asset::<Tokenizer>()
+            .add_asset_loader(TokenizerLoader::default());
     }
 }
 
 #[derive(Debug, Default)]
 pub struct TokenizerLoader;
+
+impl AssetLoader for TokenizerLoader {
+    fn load<'a>(
+        &'a self,
+        bytes: &'a [u8],
+        load_context: &'a mut LoadContext,
+    ) -> BoxedFuture<'a, Result<(), bevy::asset::Error>> {
+        Box::pin(async move {
+            let vocab = String::from_utf8_lossy(bytes);
+            let tokenizer = Tokenizer::new(&vocab)?;
+            load_context.set_default_asset(LoadedAsset::new(tokenizer));
+            Ok(())
+        })
+    }
+
+    fn extensions(&self) -> &[&str] {
+        &["vocab"]
+    }
+}
 
 #[derive(Debug)]
 pub enum TokenizerErrorKind {
@@ -51,7 +75,8 @@ impl std::fmt::Display for TokenizerError {
 
 impl std::error::Error for TokenizerError {}
 
-#[derive(Clone)]
+#[derive(Clone, TypeUuid)]
+#[uuid = "94f26966-ffbd-4035-9176-79cf4cea0fff"]
 pub struct Tokenizer {
     first_bytes_to_lengths: Vec<Box<[u16]>>,
     bytes_to_token_index: HashMap<Vec<u8>, u16>,

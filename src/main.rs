@@ -49,7 +49,7 @@ fn print_on_load(
             let string = "Hello world! 帝高阳之苗裔兮，朕皇考曰伯庸。";
             let (tokens, string) = tokenize(string).unwrap();
 
-            info!("{:#?}", tokens);
+            info!("{:?}", tokens);
             info!("{:#?}", string);
             info!("{:#?}", model);
             state.printed = true;

@@ -2,7 +2,10 @@ use bevy::{
     asset::{AssetLoader, LoadContext, LoadedAsset},
     prelude::*,
     reflect::TypeUuid,
-    render::{render_asset::RenderAssetPlugin, RenderApp},
+    render::{
+        extract_component::{ExtractComponent, ExtractComponentPlugin},
+        render_asset::RenderAssetPlugin,
+    },
     utils::BoxedFuture,
 };
 use bytemuck::pod_collect_to_vec;
@@ -12,7 +15,7 @@ use std::sync::Arc;
 
 pub mod render;
 
-use render::ModelPipeline;
+use self::render::RenderPlugin;
 
 pub struct ModelPlugin;
 
@@ -20,10 +23,10 @@ impl Plugin for ModelPlugin {
     fn build(&self, app: &mut App) {
         app.add_asset::<Model>()
             .init_asset_loader::<ModelAssetLoader>()
-            .add_plugin(RenderAssetPlugin::<Model>::default());
-
-        let render_app = app.sub_app_mut(RenderApp);
-        render_app.init_resource::<ModelPipeline>();
+            .add_plugin(RenderPlugin)
+            .add_plugin(RenderAssetPlugin::<Model>::default())
+            .add_plugin(ExtractComponentPlugin::<PromptTokens>::default())
+            .add_plugin(ExtractComponentPlugin::<State>::default());
     }
 }
 
@@ -215,3 +218,11 @@ impl AssetLoader for ModelAssetLoader {
         &["st", "safetensors"]
     }
 }
+
+#[derive(Debug, Clone, Component, ExtractComponent)]
+pub struct PromptTokens {
+    pub tokens: Vec<u32>,
+}
+
+#[derive(Debug, Clone, Copy, Component, ExtractComponent)]
+pub struct State(pub usize);

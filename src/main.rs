@@ -1,6 +1,5 @@
 use bevy::prelude::*;
 
-pub mod execute;
 pub mod model;
 pub mod tokenizer;
 

@@ -1,3 +1,4 @@
+use ahash::AHashMap as HashMap;
 use bevy::{
     ecs::system::{lifetimeless::SRes, SystemParamItem},
     prelude::*,
@@ -5,11 +6,25 @@ use bevy::{
         render_asset::{PrepareAssetError, RenderAsset},
         render_resource::*,
         renderer::{RenderDevice, RenderQueue},
+        RenderApp, RenderSet,
     },
 };
 use bytemuck::cast_slice;
 
-use crate::model::Model;
+use super::Model;
+
+pub struct RenderPlugin;
+
+impl Plugin for RenderPlugin {
+    fn build(&self, app: &mut App) {
+        let render_app = app.sub_app_mut(RenderApp);
+        render_app
+            .init_resource::<ModelPipeline>()
+            .init_resource::<StateCache>()
+            .init_resource::<BufferCache>()
+            .add_system(buffer_cache_system.in_set(RenderSet::Cleanup));
+    }
+}
 
 #[derive(Resource)]
 pub struct ModelPipeline {
@@ -590,6 +605,137 @@ pub struct GpuHead {
     pub w: Buffer,
 }
 
+pub struct PreparedModel {
+    pub model: GpuModel,
+    pub embed: GpuEmbed,
+    pub head: GpuHead,
+    pub layers: Vec<GpuLayer>,
+}
+
+impl RenderAsset for Model {
+    type ExtractedAsset = Self;
+    type PreparedAsset = PreparedModel;
+    type Param = (SRes<RenderDevice>, SRes<RenderQueue>);
+
+    fn extract_asset(&self) -> Self::ExtractedAsset {
+        self.clone()
+    }
+
+    fn prepare_asset(
+        asset: Self::ExtractedAsset,
+        (device, queue): &mut SystemParamItem<Self::Param>,
+    ) -> Result<Self::PreparedAsset, PrepareAssetError<Self::ExtractedAsset>> {
+        let Self {
+            num_layers,
+            num_emb,
+            num_vocab,
+            tensors,
+        } = asset;
+
+        let num_layers = num_layers as u32;
+        let num_emb = num_emb as u32;
+        let num_vocab = num_vocab as u32;
+
+        let model = GpuModel {
+            num_layers,
+            num_emb,
+            num_vocab,
+        };
+
+        let create_buffer = |data| {
+            device.create_buffer_with_data(&BufferInitDescriptor {
+                label: None,
+                contents: data,
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+            })
+        };
+
+        let embed = GpuEmbed {
+            layer_norm: GpuLayerNorm {
+                w: create_buffer(cast_slice(&tensors.embed.layer_norm.w)),
+                b: create_buffer(cast_slice(&tensors.embed.layer_norm.b)),
+            },
+            w: create_buffer(cast_slice(&tensors.embed.w)),
+        };
+
+        let head = {
+            let mut dims = UniformBuffer::from(UVec2::new(num_emb, num_vocab));
+            dims.write_buffer(device, queue);
+
+            GpuHead {
+                layer_norm: GpuLayerNorm {
+                    w: create_buffer(cast_slice(&tensors.head.layer_norm.w)),
+                    b: create_buffer(cast_slice(&tensors.head.layer_norm.b)),
+                },
+                dims,
+                w: create_buffer(cast_slice(&tensors.head.w)),
+            }
+        };
+
+        let layers: Vec<GpuLayer> = tensors
+            .layers
+            .iter()
+            .map(|layer| {
+                let att_layer_norm = GpuLayerNorm {
+                    w: create_buffer(cast_slice(&layer.att_layer_norm.w)),
+                    b: create_buffer(cast_slice(&layer.att_layer_norm.b)),
+                };
+
+                let ffn_layer_norm = GpuLayerNorm {
+                    w: create_buffer(cast_slice(&layer.ffn_layer_norm.w)),
+                    b: create_buffer(cast_slice(&layer.ffn_layer_norm.b)),
+                };
+
+                let mut dims = UniformBuffer::from(UVec2::new(num_emb, num_emb));
+                dims.write_buffer(device, queue);
+                let att = GpuAtt {
+                    time_decay: create_buffer(cast_slice(&layer.att.time_decay)),
+                    time_first: create_buffer(cast_slice(&layer.att.time_first)),
+                    time_mix_k: create_buffer(cast_slice(&layer.att.time_mix_k)),
+                    time_mix_v: create_buffer(cast_slice(&layer.att.time_mix_v)),
+                    time_mix_r: create_buffer(cast_slice(&layer.att.time_mix_r)),
+                    dims,
+                    w_k: create_buffer(cast_slice(&layer.att.w_k)),
+                    w_v: create_buffer(cast_slice(&layer.att.w_v)),
+                    w_r: create_buffer(cast_slice(&layer.att.w_r)),
+                    w_o: create_buffer(cast_slice(&layer.att.w_o)),
+                };
+
+                let mut dims_k = UniformBuffer::from(UVec2::new(num_emb, 4 * num_emb));
+                let mut dims_v = UniformBuffer::from(UVec2::new(4 * num_emb, num_emb));
+                let mut dims_r = UniformBuffer::from(UVec2::new(num_emb, num_emb));
+                dims_k.write_buffer(device, queue);
+                dims_v.write_buffer(device, queue);
+                dims_r.write_buffer(device, queue);
+                let ffn = GpuFfn {
+                    time_mix_k: create_buffer(cast_slice(&layer.ffn.time_mix_k)),
+                    time_mix_r: create_buffer(cast_slice(&layer.ffn.time_mix_r)),
+                    dims_k,
+                    dims_v,
+                    dims_r,
+                    w_k: create_buffer(cast_slice(&layer.ffn.w_k)),
+                    w_v: create_buffer(cast_slice(&layer.ffn.w_v)),
+                    w_r: create_buffer(cast_slice(&layer.ffn.w_r)),
+                };
+
+                GpuLayer {
+                    att_layer_norm,
+                    ffn_layer_norm,
+                    att,
+                    ffn,
+                }
+            })
+            .collect();
+
+        Ok(PreparedModel {
+            model,
+            embed,
+            head,
+            layers,
+        })
+    }
+}
+
 pub struct GpuLayerState {
     pub att_x: Buffer,
     pub att_a: Buffer,
@@ -599,9 +745,9 @@ pub struct GpuLayerState {
 }
 
 impl GpuLayerState {
-    pub fn new(device: &RenderDevice, model: &Model) -> Self {
+    pub fn new(device: &RenderDevice, num_emb: usize) -> Self {
         let create_buffer = |value: f32| {
-            let size = model.num_emb / 4;
+            let size = num_emb;
             let data = vec![value; size];
             device.create_buffer_with_data(&BufferInitDescriptor {
                 label: None,
@@ -663,8 +809,8 @@ pub struct GpuLayerBuffer {
 }
 
 impl GpuLayerBuffer {
-    pub fn new(device: &RenderDevice, model: &Model, num_tokens: usize) -> Self {
-        let size = num_tokens * model.num_emb / 4;
+    pub fn new(device: &RenderDevice, num_emb: usize, num_tokens: usize) -> Self {
+        let size = num_tokens * num_emb;
         let data = vec![0.0f32; size];
         let create_buffer = || {
             device.create_buffer_with_data(&BufferInitDescriptor {
@@ -1158,8 +1304,8 @@ pub struct GpuEmbedBuffer {
 }
 
 impl GpuEmbedBuffer {
-    pub fn new(device: &RenderDevice, model: &Model, num_tokens: usize) -> Self {
-        let size = num_tokens * model.num_emb / 4;
+    pub fn new(device: &RenderDevice, num_emb: usize, num_tokens: usize) -> Self {
+        let size = num_tokens * num_emb;
         let data = vec![0.0f32; size];
         let create_buffer = || {
             device.create_buffer_with_data(&BufferInitDescriptor {
@@ -1240,8 +1386,8 @@ pub struct GpuHeadBuffer {
 }
 
 impl GpuHeadBuffer {
-    pub fn new(device: &RenderDevice, model: &Model, num_tokens: usize) -> Self {
-        let size = num_tokens * model.num_emb / 4;
+    pub fn new(device: &RenderDevice, num_emb: usize, num_tokens: usize) -> Self {
+        let size = num_tokens * num_emb;
         let data = vec![0.0f32; size];
         let create_buffer = || {
             device.create_buffer_with_data(&BufferInitDescriptor {
@@ -1319,133 +1465,75 @@ impl HeadBindGroup {
     }
 }
 
-pub struct PreparedModel {
-    pub model: GpuModel,
-    pub embed: GpuEmbed,
-    pub head: GpuHead,
-    pub layers: Vec<GpuLayer>,
+#[derive(Resource, Default)]
+pub struct StateCache(HashMap<usize, Vec<GpuLayerState>>);
+
+impl StateCache {
+    pub fn get(
+        &mut self,
+        device: &RenderDevice,
+        key: usize,
+        num_layers: usize,
+        num_emb: usize,
+    ) -> &[GpuLayerState] {
+        if !self.0.contains_key(&key) {
+            let mut states = vec![];
+            states.reserve(num_layers);
+            for _layer in 0..num_layers {
+                states.push(GpuLayerState::new(device, num_emb));
+            }
+            self.0.insert(key, states);
+        }
+
+        &self.0.get(&key).unwrap()
+    }
 }
 
-impl RenderAsset for Model {
-    type ExtractedAsset = Self;
-    type PreparedAsset = PreparedModel;
-    type Param = (SRes<RenderDevice>, SRes<RenderQueue>);
+pub struct BufferCacheItem {
+    pub input: GpuInputBuffer,
+    pub embed: GpuEmbedBuffer,
+    pub head: GpuHeadBuffer,
+    pub layer: GpuLayerBuffer,
+}
 
-    fn extract_asset(&self) -> Self::ExtractedAsset {
-        self.clone()
+#[derive(Resource, Default)]
+pub struct BufferCache(HashMap<(usize, usize), (BufferCacheItem, usize)>);
+
+impl BufferCache {
+    pub fn get(
+        &mut self,
+        device: &RenderDevice,
+        queue: &RenderQueue,
+        num_emb: usize,
+        inputs: Vec<u32>,
+    ) -> &BufferCacheItem {
+        let num_tokens = inputs.len();
+        let key = &(num_emb, num_tokens);
+        if self.0.contains_key(&key) {
+            let (item, counter) = self.0.get_mut(&key).unwrap();
+            *counter = 0;
+            item
+        } else {
+            self.0.insert(
+                *key,
+                (
+                    BufferCacheItem {
+                        input: GpuInputBuffer::new(device, queue, inputs),
+                        embed: GpuEmbedBuffer::new(device, num_emb, num_tokens),
+                        head: GpuHeadBuffer::new(device, num_emb, num_tokens),
+                        layer: GpuLayerBuffer::new(device, num_emb, num_tokens),
+                    },
+                    0,
+                ),
+            );
+            &self.0.get(key).unwrap().0
+        }
     }
+}
 
-    fn prepare_asset(
-        asset: Self::ExtractedAsset,
-        (device, queue): &mut SystemParamItem<Self::Param>,
-    ) -> Result<Self::PreparedAsset, PrepareAssetError<Self::ExtractedAsset>> {
-        let Self {
-            num_layers,
-            num_emb,
-            num_vocab,
-            tensors,
-        } = asset;
-
-        let num_layers = num_layers as u32;
-        let num_emb = num_emb as u32;
-        let num_vocab = num_vocab as u32;
-
-        let model = GpuModel {
-            num_layers,
-            num_emb,
-            num_vocab,
-        };
-
-        let create_buffer = |data| {
-            device.create_buffer_with_data(&BufferInitDescriptor {
-                label: None,
-                contents: data,
-                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
-            })
-        };
-
-        let embed = GpuEmbed {
-            layer_norm: GpuLayerNorm {
-                w: create_buffer(cast_slice(&tensors.embed.layer_norm.w)),
-                b: create_buffer(cast_slice(&tensors.embed.layer_norm.b)),
-            },
-            w: create_buffer(cast_slice(&tensors.embed.w)),
-        };
-
-        let head = {
-            let mut dims = UniformBuffer::from(UVec2::new(num_emb, num_vocab));
-            dims.write_buffer(device, queue);
-
-            GpuHead {
-                layer_norm: GpuLayerNorm {
-                    w: create_buffer(cast_slice(&tensors.head.layer_norm.w)),
-                    b: create_buffer(cast_slice(&tensors.head.layer_norm.b)),
-                },
-                dims,
-                w: create_buffer(cast_slice(&tensors.head.w)),
-            }
-        };
-
-        let layers: Vec<GpuLayer> = tensors
-            .layers
-            .iter()
-            .map(|layer| {
-                let att_layer_norm = GpuLayerNorm {
-                    w: create_buffer(cast_slice(&layer.att_layer_norm.w)),
-                    b: create_buffer(cast_slice(&layer.att_layer_norm.b)),
-                };
-
-                let ffn_layer_norm = GpuLayerNorm {
-                    w: create_buffer(cast_slice(&layer.ffn_layer_norm.w)),
-                    b: create_buffer(cast_slice(&layer.ffn_layer_norm.b)),
-                };
-
-                let mut dims = UniformBuffer::from(UVec2::new(num_emb, num_emb));
-                dims.write_buffer(device, queue);
-                let att = GpuAtt {
-                    time_decay: create_buffer(cast_slice(&layer.att.time_decay)),
-                    time_first: create_buffer(cast_slice(&layer.att.time_first)),
-                    time_mix_k: create_buffer(cast_slice(&layer.att.time_mix_k)),
-                    time_mix_v: create_buffer(cast_slice(&layer.att.time_mix_v)),
-                    time_mix_r: create_buffer(cast_slice(&layer.att.time_mix_r)),
-                    dims,
-                    w_k: create_buffer(cast_slice(&layer.att.w_k)),
-                    w_v: create_buffer(cast_slice(&layer.att.w_v)),
-                    w_r: create_buffer(cast_slice(&layer.att.w_r)),
-                    w_o: create_buffer(cast_slice(&layer.att.w_o)),
-                };
-
-                let mut dims_k = UniformBuffer::from(UVec2::new(num_emb, 4 * num_emb));
-                let mut dims_v = UniformBuffer::from(UVec2::new(4 * num_emb, num_emb));
-                let mut dims_r = UniformBuffer::from(UVec2::new(num_emb, num_emb));
-                dims_k.write_buffer(device, queue);
-                dims_v.write_buffer(device, queue);
-                dims_r.write_buffer(device, queue);
-                let ffn = GpuFfn {
-                    time_mix_k: create_buffer(cast_slice(&layer.ffn.time_mix_k)),
-                    time_mix_r: create_buffer(cast_slice(&layer.ffn.time_mix_r)),
-                    dims_k,
-                    dims_v,
-                    dims_r,
-                    w_k: create_buffer(cast_slice(&layer.ffn.w_k)),
-                    w_v: create_buffer(cast_slice(&layer.ffn.w_v)),
-                    w_r: create_buffer(cast_slice(&layer.ffn.w_r)),
-                };
-
-                GpuLayer {
-                    att_layer_norm,
-                    ffn_layer_norm,
-                    att,
-                    ffn,
-                }
-            })
-            .collect();
-
-        Ok(PreparedModel {
-            model,
-            embed,
-            head,
-            layers,
-        })
+fn buffer_cache_system(mut buffer_cache: ResMut<BufferCache>) {
+    for (_, (_, counter)) in buffer_cache.0.iter_mut() {
+        *counter += 1;
     }
+    buffer_cache.0.retain(|_, (_, counter)| *counter < 3);
 }

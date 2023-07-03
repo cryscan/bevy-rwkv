@@ -3,7 +3,7 @@ use bevy::{
     ecs::system::{lifetimeless::SRes, SystemParamItem},
     prelude::*,
     render::{
-        render_asset::{PrepareAssetError, RenderAsset},
+        render_asset::{PrepareAssetError, RenderAsset, RenderAssets},
         render_resource::*,
         renderer::{RenderDevice, RenderQueue},
         RenderApp, RenderSet,
@@ -11,7 +11,7 @@ use bevy::{
 };
 use bytemuck::cast_slice;
 
-use super::Model;
+use super::{Model, PromptTokens};
 
 pub struct RenderPlugin;
 
@@ -22,6 +22,7 @@ impl Plugin for RenderPlugin {
             .init_resource::<ModelPipeline>()
             .init_resource::<StateCache>()
             .init_resource::<BufferCache>()
+            .add_system(queue_bind_group.in_set(RenderSet::Queue))
             .add_system(buffer_cache_system.in_set(RenderSet::Cleanup));
     }
 }
@@ -765,19 +766,31 @@ impl GpuLayerState {
     }
 }
 
+#[derive(Deref, DerefMut)]
+pub struct GpuLayerStates(pub Vec<GpuLayerState>);
+
+impl GpuLayerStates {
+    pub fn new(device: &RenderDevice, num_layers: usize, num_emb: usize) -> Self {
+        let states = (0..num_layers)
+            .map(|_| GpuLayerState::new(device, num_emb))
+            .collect();
+        Self(states)
+    }
+}
+
 pub struct GpuInputBuffer {
     pub num_tokens: UniformBuffer<u32>,
     pub tokens: Buffer,
 }
 
 impl GpuInputBuffer {
-    pub fn new(device: &RenderDevice, queue: &RenderQueue, inputs: Vec<u32>) -> Self {
+    pub fn new(device: &RenderDevice, queue: &RenderQueue, inputs: &Vec<u32>) -> Self {
         let mut num_tokens = UniformBuffer::from(inputs.len() as u32);
         num_tokens.write_buffer(device, queue);
 
         let tokens = device.create_buffer_with_data(&BufferInitDescriptor {
             label: None,
-            contents: cast_slice(&inputs),
+            contents: cast_slice(inputs),
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
         });
 
@@ -1382,14 +1395,14 @@ impl EmbedBindGroup {
 pub struct GpuHeadBuffer {
     pub in_x: Buffer,
     pub x: Buffer,
-    pub prob: Buffer,
+    pub logits: Buffer,
 }
 
 impl GpuHeadBuffer {
-    pub fn new(device: &RenderDevice, num_emb: usize, num_tokens: usize) -> Self {
-        let size = num_tokens * num_emb;
-        let data = vec![0.0f32; size];
-        let create_buffer = || {
+    pub fn new(device: &RenderDevice, num_emb: usize, num_vocab: usize, num_tokens: usize) -> Self {
+        let create_buffer = |dim: usize| {
+            let size = num_tokens * dim;
+            let data = vec![0.0f32; size];
             device.create_buffer_with_data(&BufferInitDescriptor {
                 label: None,
                 contents: cast_slice(&data),
@@ -1397,9 +1410,9 @@ impl GpuHeadBuffer {
             })
         };
         Self {
-            in_x: create_buffer(),
-            x: create_buffer(),
-            prob: create_buffer(),
+            in_x: create_buffer(num_emb),
+            x: create_buffer(num_emb),
+            logits: create_buffer(num_vocab),
         }
     }
 }
@@ -1456,7 +1469,7 @@ impl HeadBindGroup {
                 },
                 BindGroupEntry {
                     binding: 3,
-                    resource: buffer.prob.as_entire_binding(),
+                    resource: buffer.logits.as_entire_binding(),
                 },
             ],
         });
@@ -1465,27 +1478,28 @@ impl HeadBindGroup {
     }
 }
 
-#[derive(Resource, Default)]
-pub struct StateCache(HashMap<usize, Vec<GpuLayerState>>);
+#[derive(Component)]
+pub struct ModelBindGroups {
+    pub embed: EmbedBindGroup,
+    pub head: HeadBindGroup,
+    pub layers: Vec<LayerBindGroup>,
+}
+
+#[derive(Resource, Default, Deref, DerefMut)]
+pub struct StateCache(HashMap<Entity, GpuLayerStates>);
 
 impl StateCache {
     pub fn get(
         &mut self,
         device: &RenderDevice,
-        key: usize,
+        entity: Entity,
         num_layers: usize,
         num_emb: usize,
-    ) -> &[GpuLayerState] {
-        if !self.0.contains_key(&key) {
-            let mut states = vec![];
-            states.reserve(num_layers);
-            for _layer in 0..num_layers {
-                states.push(GpuLayerState::new(device, num_emb));
-            }
-            self.0.insert(key, states);
+    ) -> &GpuLayerStates {
+        if !self.contains_key(&entity) {
+            self.insert(entity, GpuLayerStates::new(device, num_layers, num_emb));
         }
-
-        &self.0.get(&key).unwrap()
+        &self[&entity]
     }
 }
 
@@ -1496,7 +1510,7 @@ pub struct BufferCacheItem {
     pub layer: GpuLayerBuffer,
 }
 
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Deref, DerefMut)]
 pub struct BufferCache(HashMap<(usize, usize), (BufferCacheItem, usize)>);
 
 impl BufferCache {
@@ -1505,29 +1519,23 @@ impl BufferCache {
         device: &RenderDevice,
         queue: &RenderQueue,
         num_emb: usize,
-        inputs: Vec<u32>,
+        num_vocab: usize,
+        tokens: &Vec<u32>,
     ) -> &BufferCacheItem {
-        let num_tokens = inputs.len();
-        let key = &(num_emb, num_tokens);
-        if self.0.contains_key(&key) {
-            let (item, counter) = self.0.get_mut(&key).unwrap();
-            *counter = 0;
-            item
-        } else {
-            self.0.insert(
-                *key,
-                (
-                    BufferCacheItem {
-                        input: GpuInputBuffer::new(device, queue, inputs),
-                        embed: GpuEmbedBuffer::new(device, num_emb, num_tokens),
-                        head: GpuHeadBuffer::new(device, num_emb, num_tokens),
-                        layer: GpuLayerBuffer::new(device, num_emb, num_tokens),
-                    },
-                    0,
-                ),
-            );
-            &self.0.get(key).unwrap().0
-        }
+        let num_tokens = tokens.len();
+        let key = (num_emb, num_tokens);
+
+        let item = match self.remove(&key) {
+            Some((item, _counter)) => item,
+            None => BufferCacheItem {
+                input: GpuInputBuffer::new(device, queue, tokens),
+                embed: GpuEmbedBuffer::new(device, num_emb, num_tokens),
+                head: GpuHeadBuffer::new(device, num_emb, num_vocab, num_tokens),
+                layer: GpuLayerBuffer::new(device, num_emb, num_tokens),
+            },
+        };
+        self.insert(key, (item, 0));
+        &self[&key].0
     }
 }
 
@@ -1536,4 +1544,57 @@ fn buffer_cache_system(mut buffer_cache: ResMut<BufferCache>) {
         *counter += 1;
     }
     buffer_cache.0.retain(|_, (_, counter)| *counter < 3);
+}
+
+fn queue_bind_group(
+    mut commands: Commands,
+    device: Res<RenderDevice>,
+    queue: Res<RenderQueue>,
+    pipeline: Res<ModelPipeline>,
+    model_assets: Res<RenderAssets<Model>>,
+    mut state_cache: ResMut<StateCache>,
+    mut buffer_cache: ResMut<BufferCache>,
+    query: Query<(Entity, &Handle<Model>, &PromptTokens)>,
+) {
+    for (entity, model_handle, prompt_tokens) in query.iter() {
+        if let Some(model) = model_assets.get(model_handle) {
+            let num_layers = model.model.num_layers as usize;
+            let num_emb = model.model.num_emb as usize;
+            let num_vocab = model.model.num_vocab as usize;
+
+            let states = state_cache.get(&device, entity, num_layers, num_emb);
+            let buffers =
+                buffer_cache.get(&device, &queue, num_emb, num_vocab, &prompt_tokens.tokens);
+
+            let embed = EmbedBindGroup::create(
+                &device,
+                &pipeline,
+                &model.embed,
+                &buffers.embed,
+                &buffers.input,
+            );
+            let head = HeadBindGroup::create(&device, &pipeline, &model.head, &buffers.head);
+            let layers: Vec<_> = itertools::zip_eq(model.layers.iter(), states.iter())
+                .filter_map(|(layer, state)| {
+                    LayerBindGroup::create(
+                        &device,
+                        &pipeline,
+                        layer,
+                        state,
+                        &buffers.input,
+                        &buffers.layer,
+                    )
+                })
+                .collect();
+            if let (Some(embed), Some(head)) = (embed, head) {
+                if layers.len() == num_layers {
+                    commands.entity(entity).insert(ModelBindGroups {
+                        embed,
+                        head,
+                        layers,
+                    });
+                }
+            }
+        }
+    }
 }

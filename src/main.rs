@@ -6,6 +6,8 @@ pub mod tokenizer;
 use model::{Model, ModelPlugin};
 use tokenizer::{Tokenizer, TokenizerPlugin};
 
+use crate::model::PromptTokens;
+
 #[derive(Resource, Default)]
 struct State {
     model: Handle<Model>,
@@ -30,6 +32,7 @@ fn setup(asset_server: Res<AssetServer>, mut state: ResMut<State>) {
 }
 
 fn print_on_load(
+    mut commands: Commands,
     mut state: ResMut<State>,
     model_assets: Res<Assets<Model>>,
     tokenizer_assets: Res<Assets<Tokenizer>>,
@@ -51,6 +54,14 @@ fn print_on_load(
             info!("{:?}", tokens);
             info!("{:#?}", string);
             info!("{:#?}", model);
+
+            commands.spawn((
+                PromptTokens {
+                    tokens: tokens.into_iter().map(u32::from).collect(),
+                },
+                state.model.clone(),
+            ));
+
             state.printed = true;
         }
     }

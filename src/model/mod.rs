@@ -26,7 +26,7 @@ impl Plugin for ModelPlugin {
             .add_plugin(RenderPlugin)
             .add_plugin(RenderAssetPlugin::<Model>::default())
             .add_plugin(ExtractComponentPlugin::<PromptTokens>::default())
-            .add_plugin(ExtractComponentPlugin::<State>::default());
+            .add_plugin(ExtractComponentPlugin::<Handle<Model>>::default());
     }
 }
 
@@ -223,6 +223,3 @@ impl AssetLoader for ModelAssetLoader {
 pub struct PromptTokens {
     pub tokens: Vec<u32>,
 }
-
-#[derive(Debug, Clone, Copy, Component, ExtractComponent)]
-pub struct State(pub usize);

@@ -4,8 +4,10 @@ use bevy::{
     prelude::*,
     render::{
         render_asset::{PrepareAssetError, RenderAsset, RenderAssets},
+        render_graph::{self, NodeRunError, RenderGraph, RenderGraphContext},
         render_resource::*,
-        renderer::{RenderDevice, RenderQueue},
+        renderer::{RenderContext, RenderDevice, RenderQueue},
+        texture::FallbackImage,
         RenderApp, RenderSet,
     },
 };
@@ -24,6 +26,12 @@ impl Plugin for RenderPlugin {
             .init_resource::<BufferCache>()
             .add_system(queue_bind_group.in_set(RenderSet::Queue))
             .add_system(buffer_cache_system.in_set(RenderSet::Cleanup));
+
+        let model_node = ModelNode::new(&mut render_app.world);
+
+        let mut render_graph = render_app.world.resource_mut::<RenderGraph>();
+        render_graph.add_node("model", model_node);
+        render_graph.add_node_edge("model", bevy::render::main_graph::node::CAMERA_DRIVER);
     }
 }
 
@@ -1480,6 +1488,7 @@ impl HeadBindGroup {
 
 #[derive(Component)]
 pub struct ModelBindGroups {
+    pub model: BindGroup,
     pub embed: EmbedBindGroup,
     pub head: HeadBindGroup,
     pub layers: Vec<LayerBindGroup>,
@@ -1489,7 +1498,7 @@ pub struct ModelBindGroups {
 pub struct StateCache(HashMap<Entity, GpuLayerStates>);
 
 impl StateCache {
-    pub fn get(
+    pub fn retreive(
         &mut self,
         device: &RenderDevice,
         entity: Entity,
@@ -1514,13 +1523,13 @@ pub struct BufferCacheItem {
 pub struct BufferCache(HashMap<(usize, usize), (BufferCacheItem, usize)>);
 
 impl BufferCache {
-    pub fn get(
+    pub fn retreive(
         &mut self,
         device: &RenderDevice,
         queue: &RenderQueue,
         num_emb: usize,
         num_vocab: usize,
-        tokens: &Vec<u32>,
+        tokens: &PromptTokens,
     ) -> &BufferCacheItem {
         let num_tokens = tokens.len();
         let key = (num_emb, num_tokens);
@@ -1528,7 +1537,7 @@ impl BufferCache {
         let item = match self.remove(&key) {
             Some((item, _counter)) => item,
             None => BufferCacheItem {
-                input: GpuInputBuffer::new(device, queue, tokens),
+                input: GpuInputBuffer::new(device, queue, &tokens.0),
                 embed: GpuEmbedBuffer::new(device, num_emb, num_tokens),
                 head: GpuHeadBuffer::new(device, num_emb, num_vocab, num_tokens),
                 layer: GpuLayerBuffer::new(device, num_emb, num_tokens),
@@ -1551,50 +1560,178 @@ fn queue_bind_group(
     device: Res<RenderDevice>,
     queue: Res<RenderQueue>,
     pipeline: Res<ModelPipeline>,
-    model_assets: Res<RenderAssets<Model>>,
+    models: Res<RenderAssets<Model>>,
+    images: Res<RenderAssets<Image>>,
+    fallback_image: Res<FallbackImage>,
     mut state_cache: ResMut<StateCache>,
     mut buffer_cache: ResMut<BufferCache>,
     query: Query<(Entity, &Handle<Model>, &PromptTokens)>,
 ) {
-    for (entity, model_handle, prompt_tokens) in query.iter() {
-        if let Some(model) = model_assets.get(model_handle) {
-            let num_layers = model.model.num_layers as usize;
-            let num_emb = model.model.num_emb as usize;
-            let num_vocab = model.model.num_vocab as usize;
+    for (entity, model, prompt_tokens) in
+        query.iter().filter_map(|(entity, handle, prompt_tokens)| {
+            models
+                .get(handle)
+                .map(|model| (entity, model, prompt_tokens))
+        })
+    {
+        let num_layers = model.model.num_layers as usize;
+        let num_emb = model.model.num_emb as usize;
+        let num_vocab = model.model.num_vocab as usize;
 
-            let states = state_cache.get(&device, entity, num_layers, num_emb);
-            let buffers =
-                buffer_cache.get(&device, &queue, num_emb, num_vocab, &prompt_tokens.tokens);
+        let states = state_cache.retreive(&device, entity, num_layers, num_emb);
+        let buffers = buffer_cache.retreive(&device, &queue, num_emb, num_vocab, &prompt_tokens);
 
-            let embed = EmbedBindGroup::create(
-                &device,
-                &pipeline,
-                &model.embed,
-                &buffers.embed,
-                &buffers.input,
+        let embed = EmbedBindGroup::create(
+            &device,
+            &pipeline,
+            &model.embed,
+            &buffers.embed,
+            &buffers.input,
+        );
+        let head = HeadBindGroup::create(&device, &pipeline, &model.head, &buffers.head);
+        let layers: Vec<_> = itertools::zip_eq(model.layers.iter(), states.iter())
+            .filter_map(|(layer, state)| {
+                LayerBindGroup::create(
+                    &device,
+                    &pipeline,
+                    layer,
+                    state,
+                    &buffers.input,
+                    &buffers.layer,
+                )
+            })
+            .collect();
+        let model = {
+            let layout = GpuModel::bind_group_layout(&device);
+            model
+                .model
+                .as_bind_group(&layout, &device, &images, &fallback_image)
+                .ok()
+        };
+        match (model, embed, head, layers) {
+            (Some(model), Some(embed), Some(head), layers) if layers.len() == num_layers => {
+                let model = model.bind_group;
+                commands.entity(entity).insert(ModelBindGroups {
+                    model,
+                    embed,
+                    head,
+                    layers,
+                });
+            }
+            _ => {
+                warn!("model bind group failed to queue");
+            }
+        }
+    }
+}
+
+pub struct ModelNode {
+    query: QueryState<(
+        Entity,
+        &'static Handle<Model>,
+        &'static PromptTokens,
+        &'static ModelBindGroups,
+    )>,
+}
+
+impl ModelNode {
+    pub fn new(world: &mut World) -> Self {
+        Self {
+            query: QueryState::new(world),
+        }
+    }
+}
+
+impl render_graph::Node for ModelNode {
+    fn update(&mut self, world: &mut World) {
+        self.query.update_archetypes(world);
+    }
+
+    fn run(
+        &self,
+        _graph: &mut RenderGraphContext,
+        render_context: &mut RenderContext,
+        world: &World,
+    ) -> Result<(), NodeRunError> {
+        let pipeline = world.resource::<ModelPipeline>();
+        let pipeline_cache = world.resource::<PipelineCache>();
+        let buffer_cache = world.resource::<BufferCache>();
+        let state_cache = world.resource::<StateCache>();
+        let models = world.resource::<RenderAssets<Model>>();
+
+        const BLOCK_SIZE: u32 = 256;
+
+        for (model, prompt_tokens, bind_group, buffer, states) in self
+            .query
+            .iter_manual(world)
+            .filter_map(|(entity, handle, prompt_tokens, bind_group)| {
+                models
+                    .get(handle)
+                    .map(|model| (entity, model, prompt_tokens, bind_group))
+            })
+            .filter_map(|(entity, model, prompt_tokens, bind_group)| {
+                let num_emb = model.model.num_emb as usize;
+                let num_tokens = prompt_tokens.len();
+                buffer_cache
+                    .get(&(num_emb, num_tokens))
+                    .zip(state_cache.get(&entity))
+                    .map(|((buffer, _), states)| (model, prompt_tokens, bind_group, buffer, states))
+            })
+        {
+            let num_layers = model.model.num_layers;
+            let num_emb = model.model.num_emb;
+            let num_vocab = model.model.num_vocab;
+            let num_tokens = prompt_tokens.len() as u32;
+
+            let buffer_size =
+                BufferAddress::from(f32::min_size()) * BufferAddress::from(num_emb * num_tokens);
+
+            {
+                let mut pass = render_context
+                    .command_encoder()
+                    .begin_compute_pass(&ComputePassDescriptor::default());
+                pass.set_bind_group(0, &bind_group.model, &[]);
+
+                if let Some(pipeline) = pipeline_cache.get_compute_pipeline(pipeline.embed_pipeline)
+                {
+                    pass.set_bind_group(1, &bind_group.embed.embed, &[]);
+                    pass.set_pipeline(pipeline);
+                    pass.dispatch_workgroups(num_emb / 4 / BLOCK_SIZE, num_tokens, 1);
+                }
+                if let Some(pipeline) =
+                    pipeline_cache.get_compute_pipeline(pipeline.layer_norm_pipeline)
+                {
+                    pass.set_bind_group(1, &bind_group.embed.layer_norm, &[]);
+                    pass.set_pipeline(pipeline);
+                    pass.dispatch_workgroups(1, num_tokens, 1);
+                }
+            }
+
+            render_context.command_encoder().copy_buffer_to_buffer(
+                &buffer.embed.x,
+                0,
+                &buffer.layer.in_x,
+                0,
+                buffer_size,
             );
-            let head = HeadBindGroup::create(&device, &pipeline, &model.head, &buffers.head);
-            let layers: Vec<_> = itertools::zip_eq(model.layers.iter(), states.iter())
-                .filter_map(|(layer, state)| {
-                    LayerBindGroup::create(
-                        &device,
-                        &pipeline,
-                        layer,
-                        state,
-                        &buffers.input,
-                        &buffers.layer,
-                    )
-                })
-                .collect();
-            if let (Some(embed), Some(head)) = (embed, head) {
-                if layers.len() == num_layers {
-                    commands.entity(entity).insert(ModelBindGroups {
-                        embed,
-                        head,
-                        layers,
-                    });
+
+            {
+                let mut pass = render_context
+                    .command_encoder()
+                    .begin_compute_pass(&ComputePassDescriptor::default());
+
+                pass.set_bind_group(0, &bind_group.model, &[]);
+
+                if let Some(pipeline) =
+                    pipeline_cache.get_compute_pipeline(pipeline.layer_norm_pipeline)
+                {
+                    pass.set_bind_group(1, &bind_group.layers[0].att_layer_norm, &[]);
+                    pass.set_pipeline(pipeline);
+                    pass.dispatch_workgroups(1, num_tokens, 1);
                 }
             }
         }
+
+        Ok(())
     }
 }

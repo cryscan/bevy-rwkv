@@ -48,7 +48,7 @@ fn print_on_load(
         };
 
         if !state.printed {
-            let string = "Hello world! 帝高阳之苗裔兮，朕皇考曰伯庸。";
+            let string = "The Eiffel Tower is located in the city of";
             let (tokens, string) = tokenize(string).unwrap();
 
             info!("{:?}", tokens);
@@ -56,9 +56,7 @@ fn print_on_load(
             info!("{:#?}", model);
 
             commands.spawn((
-                PromptTokens {
-                    tokens: tokens.into_iter().map(u32::from).collect(),
-                },
+                PromptTokens(tokens.into_iter().map(u32::from).collect()),
                 state.model.clone(),
             ));
 

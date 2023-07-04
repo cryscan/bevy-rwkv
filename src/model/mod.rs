@@ -219,7 +219,5 @@ impl AssetLoader for ModelAssetLoader {
     }
 }
 
-#[derive(Debug, Clone, Component, ExtractComponent)]
-pub struct PromptTokens {
-    pub tokens: Vec<u32>,
-}
+#[derive(Debug, Clone, Deref, DerefMut, Component, ExtractComponent)]
+pub struct PromptTokens(pub Vec<u32>);

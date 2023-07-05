@@ -40,8 +40,8 @@ fn token_mix(@builtin(global_invocation_id) invocation_id: vec3<u32>) {
         var e1 = exp(pp - q);
         var e2 = exp(ww - q);
 
-        let rr = 1.0 / (1.0 + exp(r[ti]));
-        output[ti] = (e1 * aa + e2 * vv) / (e1 * bb + e2);
+        let rr = 1.0 / (1.0 + exp(-r[ti]));
+        output[ti] = rr * (e1 * aa + e2 * vv) / (e1 * bb + e2);
         storageBarrier();
 
         ww = time_decay[index] + pp;

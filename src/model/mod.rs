@@ -161,7 +161,10 @@ impl AssetLoader for ModelAssetLoader {
 
                 let att = format!("blocks.{layer}.att");
                 let att = Att {
-                    time_decay: tensor_to_vec_f32(format!("{att}.time_decay"))?,
+                    time_decay: tensor_to_vec_f32(format!("{att}.time_decay"))?
+                        .into_iter()
+                        .map(|x| -x.exp())
+                        .collect(),
                     time_first: tensor_to_vec_f32(format!("{att}.time_first"))?,
                     time_mix_k: tensor_to_vec_f32(format!("{att}.time_mix_k"))?,
                     time_mix_v: tensor_to_vec_f32(format!("{att}.time_mix_v"))?,

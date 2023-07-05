@@ -1691,6 +1691,7 @@ impl render_graph::Node for ModelNode {
 
             let buffer_size =
                 BufferAddress::from(f32::min_size()) * BufferAddress::from(num_emb * num_tokens);
+            let num_emb_vec4 = num_emb / 4;
 
             {
                 let mut pass = render_context
@@ -1742,13 +1743,28 @@ impl render_graph::Node for ModelNode {
                     pass.set_pipeline(pipeline);
 
                     pass.set_bind_group(1, &bind_group.layers[0].att_token_shift_k, &[]);
-                    pass.dispatch_workgroups(num_emb / 4 / BLOCK_SIZE, num_tokens, 1);
+                    pass.dispatch_workgroups(num_emb_vec4 / BLOCK_SIZE, num_tokens, 1);
 
                     pass.set_bind_group(1, &bind_group.layers[0].att_token_shift_v, &[]);
-                    pass.dispatch_workgroups(num_emb / 4 / BLOCK_SIZE, num_tokens, 1);
+                    pass.dispatch_workgroups(num_emb_vec4 / BLOCK_SIZE, num_tokens, 1);
 
                     pass.set_bind_group(1, &bind_group.layers[0].att_token_shift_r, &[]);
-                    pass.dispatch_workgroups(num_emb / 4 / BLOCK_SIZE, num_tokens, 1);
+                    pass.dispatch_workgroups(num_emb_vec4 / BLOCK_SIZE, num_tokens, 1);
+                }
+
+                if let Some(pipeline) =
+                    pipeline_cache.get_compute_pipeline(pipeline.matmul_pipeline)
+                {
+                    pass.set_pipeline(pipeline);
+
+                    pass.set_bind_group(1, &bind_group.layers[0].att_matmul_k, &[]);
+                    pass.dispatch_workgroups(1, num_emb_vec4, num_tokens);
+
+                    pass.set_bind_group(1, &bind_group.layers[0].att_matmul_v, &[]);
+                    pass.dispatch_workgroups(1, num_emb_vec4, num_tokens);
+
+                    pass.set_bind_group(1, &bind_group.layers[0].att_matmul_r, &[]);
+                    pass.dispatch_workgroups(1, num_emb_vec4, num_tokens);
                 }
             }
         }

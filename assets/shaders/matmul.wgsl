@@ -37,11 +37,12 @@ fn matmul(@builtin(global_invocation_id) invocation_id: vec3<u32>) {
         var data: vec2<u32>;
         var m: vec4<f32>;
 
-        data = matrix[ci]; m = vec4<f32>(unpack2x16float(data.x), unpack2x16float(data.y)); local_sum[index].x = dot(x, m); ci += stride.x;
-        data = matrix[ci]; m = vec4<f32>(unpack2x16float(data.x), unpack2x16float(data.y)); local_sum[index].y = dot(x, m); ci += stride.x;
-        data = matrix[ci]; m = vec4<f32>(unpack2x16float(data.x), unpack2x16float(data.y)); local_sum[index].z = dot(x, m); ci += stride.x;
-        data = matrix[ci]; m = vec4<f32>(unpack2x16float(data.x), unpack2x16float(data.y)); local_sum[index].w = dot(x, m);
+        data = matrix[ci]; m = vec4<f32>(unpack2x16float(data.x), unpack2x16float(data.y)); local_sum[index].x += dot(x, m); ci += stride.x;
+        data = matrix[ci]; m = vec4<f32>(unpack2x16float(data.x), unpack2x16float(data.y)); local_sum[index].y += dot(x, m); ci += stride.x;
+        data = matrix[ci]; m = vec4<f32>(unpack2x16float(data.x), unpack2x16float(data.y)); local_sum[index].z += dot(x, m); ci += stride.x;
+        data = matrix[ci]; m = vec4<f32>(unpack2x16float(data.x), unpack2x16float(data.y)); local_sum[index].w += dot(x, m);
     }
+    workgroupBarrier();
 
     reduce_step_barrier(index, 128u);
     reduce_step_barrier(index, 64u);

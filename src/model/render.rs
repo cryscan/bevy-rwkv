@@ -1796,6 +1796,7 @@ impl render_graph::Node for ModelNode {
             let buffer_size =
                 BufferAddress::from(f32::min_size()) * BufferAddress::from(num_emb * num_tokens);
             let num_emb_vec4 = num_emb / 4;
+            let num_vocab_vec4 = num_vocab / 4;
 
             match self.state {
                 ModelNodeState::Run => {
@@ -2002,7 +2003,7 @@ impl render_graph::Node for ModelNode {
                         {
                             pass.set_pipeline(pipeline);
                             pass.set_bind_group(1, &bind_group.head.matmul, &[]);
-                            pass.dispatch_workgroups(1, num_vocab, num_tokens);
+                            pass.dispatch_workgroups(1, num_vocab_vec4, num_tokens);
                         }
                     }
                 }

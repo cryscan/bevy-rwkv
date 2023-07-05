@@ -48,7 +48,7 @@ fn print_on_load(
         };
 
         if !state.printed {
-            let string = "The Eiffel Tower is located in the city of";
+            let string = "Hello";
             let (tokens, string) = tokenize(string).unwrap();
 
             info!("{:?}", tokens);

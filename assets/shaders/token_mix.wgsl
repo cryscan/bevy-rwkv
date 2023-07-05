@@ -42,7 +42,6 @@ fn token_mix(@builtin(global_invocation_id) invocation_id: vec3<u32>) {
 
         let rr = 1.0 / (1.0 + exp(-r[ti]));
         output[ti] = rr * (e1 * aa + e2 * vv) / (e1 * bb + e2);
-        storageBarrier();
 
         ww = time_decay[index] + pp;
         q = max(ww, kk);
@@ -51,7 +50,6 @@ fn token_mix(@builtin(global_invocation_id) invocation_id: vec3<u32>) {
         a[index] = e1 * aa + e2 * vv;
         b[index] = e1 * bb + e2;
         p[index] = q;
-        storageBarrier();
     }
 
     sx[index] = x[(num_tokens - 1u) * stride + index];

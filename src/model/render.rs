@@ -12,8 +12,9 @@ use bevy::{
     },
 };
 use bytemuck::cast_slice;
+use std::sync::Arc;
 
-use super::{Model, PromptTokens};
+use super::{Model, ModelInfo, PromptTokens};
 
 pub struct RenderPlugin;
 
@@ -551,7 +552,7 @@ impl FromWorld for ModelPipeline {
     }
 }
 
-#[derive(AsBindGroup)]
+#[derive(AsBindGroup, Clone, Copy)]
 pub struct GpuModel {
     #[uniform(0)]
     pub num_layers: u32,
@@ -615,6 +616,7 @@ pub struct GpuHead {
 }
 
 pub struct PreparedModel {
+    pub info: ModelInfo,
     pub model: GpuModel,
     pub embed: GpuEmbed,
     pub head: GpuHead,
@@ -634,16 +636,11 @@ impl RenderAsset for Model {
         asset: Self::ExtractedAsset,
         (device, queue): &mut SystemParamItem<Self::Param>,
     ) -> Result<Self::PreparedAsset, PrepareAssetError<Self::ExtractedAsset>> {
-        let Self {
-            num_layers,
-            num_emb,
-            num_vocab,
-            tensors,
-        } = asset;
+        let Self { info, tensors } = asset;
 
-        let num_layers = num_layers as u32;
-        let num_emb = num_emb as u32;
-        let num_vocab = num_vocab as u32;
+        let num_layers = info.num_layers as u32;
+        let num_emb = info.num_emb as u32;
+        let num_vocab = info.num_vocab as u32;
 
         let model = GpuModel {
             num_layers,
@@ -737,6 +734,7 @@ impl RenderAsset for Model {
             .collect();
 
         Ok(PreparedModel {
+            info,
             model,
             embed,
             head,
@@ -775,16 +773,19 @@ impl GpuLayerState {
 }
 
 #[derive(Deref, DerefMut)]
-pub struct GpuLayerStates(pub Vec<GpuLayerState>);
+pub struct GpuStates(pub Vec<GpuLayerState>);
 
-impl GpuLayerStates {
-    pub fn new(device: &RenderDevice, num_layers: usize, num_emb: usize) -> Self {
-        let states = (0..num_layers)
-            .map(|_| GpuLayerState::new(device, num_emb))
+impl GpuStates {
+    pub fn new(device: &RenderDevice, info: ModelInfo) -> Self {
+        let states = (0..info.num_layers)
+            .map(|_| GpuLayerState::new(device, info.num_emb))
             .collect();
         Self(states)
     }
 }
+
+#[derive(Component, Clone, Deref, DerefMut)]
+pub struct ModelStates(pub Arc<GpuStates>);
 
 pub struct GpuInputBuffer {
     pub num_tokens: UniformBuffer<u32>,
@@ -830,8 +831,8 @@ pub struct GpuLayerBuffer {
 }
 
 impl GpuLayerBuffer {
-    pub fn new(device: &RenderDevice, num_emb: usize, num_tokens: usize) -> Self {
-        let size = num_tokens * num_emb;
+    pub fn new(device: &RenderDevice, info: ModelInfo, num_tokens: usize) -> Self {
+        let size = num_tokens * info.num_emb;
         let data = vec![0.0f32; size];
         let create_buffer = || {
             device.create_buffer_with_data(&BufferInitDescriptor {
@@ -1325,8 +1326,8 @@ pub struct GpuEmbedBuffer {
 }
 
 impl GpuEmbedBuffer {
-    pub fn new(device: &RenderDevice, num_emb: usize, num_tokens: usize) -> Self {
-        let size = num_tokens * num_emb;
+    pub fn new(device: &RenderDevice, info: ModelInfo, num_tokens: usize) -> Self {
+        let size = num_tokens * info.num_emb;
         let data = vec![0.0f32; size];
         let create_buffer = || {
             device.create_buffer_with_data(&BufferInitDescriptor {
@@ -1407,7 +1408,7 @@ pub struct GpuHeadBuffer {
 }
 
 impl GpuHeadBuffer {
-    pub fn new(device: &RenderDevice, num_emb: usize, num_vocab: usize, num_tokens: usize) -> Self {
+    pub fn new(device: &RenderDevice, info: ModelInfo, num_tokens: usize) -> Self {
         let create_buffer = |dim: usize| {
             let size = num_tokens * dim;
             let data = vec![0.0f32; size];
@@ -1418,9 +1419,9 @@ impl GpuHeadBuffer {
             })
         };
         Self {
-            in_x: create_buffer(num_emb),
-            x: create_buffer(num_emb),
-            logits: create_buffer(num_vocab),
+            in_x: create_buffer(info.num_emb),
+            x: create_buffer(info.num_emb),
+            logits: create_buffer(info.num_vocab),
         }
     }
 }
@@ -1495,56 +1496,60 @@ pub struct ModelBindGroups {
 }
 
 #[derive(Resource, Default, Deref, DerefMut)]
-pub struct StateCache(HashMap<Entity, GpuLayerStates>);
+pub struct StateCache(HashMap<Entity, Arc<GpuStates>>);
 
 impl StateCache {
     pub fn retreive(
         &mut self,
         device: &RenderDevice,
         entity: Entity,
-        num_layers: usize,
-        num_emb: usize,
-    ) -> &GpuLayerStates {
+        info: ModelInfo,
+    ) -> Arc<GpuStates> {
         if !self.contains_key(&entity) {
-            self.insert(entity, GpuLayerStates::new(device, num_layers, num_emb));
+            self.insert(entity, Arc::new(GpuStates::new(device, info)));
         }
-        &self[&entity]
+        self[&entity].clone()
     }
 }
 
-pub struct BufferCacheItem {
+pub struct GpuBuffers {
     pub input: GpuInputBuffer,
     pub embed: GpuEmbedBuffer,
     pub head: GpuHeadBuffer,
     pub layer: GpuLayerBuffer,
 }
 
+#[derive(Component, Clone, Deref, DerefMut)]
+pub struct ModelBuffers(pub Arc<GpuBuffers>);
+
 #[derive(Resource, Default, Deref, DerefMut)]
-pub struct BufferCache(HashMap<(usize, usize), (BufferCacheItem, usize)>);
+pub struct BufferCache(HashMap<ModelInfo, (Arc<GpuBuffers>, usize)>);
 
 impl BufferCache {
     pub fn retreive(
         &mut self,
         device: &RenderDevice,
         queue: &RenderQueue,
-        num_emb: usize,
-        num_vocab: usize,
+        info: ModelInfo,
         tokens: &PromptTokens,
-    ) -> &BufferCacheItem {
+    ) -> Arc<GpuBuffers> {
         let num_tokens = tokens.len();
-        let key = (num_emb, num_tokens);
 
-        let item = match self.remove(&key) {
-            Some((item, _counter)) => item,
-            None => BufferCacheItem {
+        let buffers = match self.remove(&info) {
+            Some((buffers, _counter)) => buffers,
+            None => Arc::new(GpuBuffers {
                 input: GpuInputBuffer::new(device, queue, &tokens.0),
-                embed: GpuEmbedBuffer::new(device, num_emb, num_tokens),
-                head: GpuHeadBuffer::new(device, num_emb, num_vocab, num_tokens),
-                layer: GpuLayerBuffer::new(device, num_emb, num_tokens),
-            },
+                embed: GpuEmbedBuffer::new(device, info, num_tokens),
+                head: GpuHeadBuffer::new(device, info, num_tokens),
+                layer: GpuLayerBuffer::new(device, info, num_tokens),
+            }),
         };
-        self.insert(key, (item, 0));
-        &self[&key].0
+        self.insert(info, (buffers, 0));
+        self[&info].0.clone()
+    }
+
+    pub fn retreive_manual(&self, info: ModelInfo) -> Option<Arc<GpuBuffers>> {
+        self.get(&info).map(|(buffers, _)| buffers.clone())
     }
 }
 
@@ -1574,12 +1579,14 @@ fn queue_bind_group(
                 .map(|model| (entity, model, prompt_tokens))
         })
     {
-        let num_layers = model.model.num_layers as usize;
-        let num_emb = model.model.num_emb as usize;
-        let num_vocab = model.model.num_vocab as usize;
+        let ModelInfo {
+            num_layers,
+            num_emb,
+            num_vocab,
+        } = model.info;
 
-        let states = state_cache.retreive(&device, entity, num_layers, num_emb);
-        let buffers = buffer_cache.retreive(&device, &queue, num_emb, num_vocab, &prompt_tokens);
+        let states = state_cache.retreive(&device, entity, model.info);
+        let buffers = buffer_cache.retreive(&device, &queue, model.info, &prompt_tokens);
 
         let embed = EmbedBindGroup::create(
             &device,
@@ -1611,12 +1618,16 @@ fn queue_bind_group(
         match (model, embed, head, layers) {
             (Some(model), Some(embed), Some(head), layers) if layers.len() == num_layers => {
                 let model = model.bind_group;
-                commands.entity(entity).insert(ModelBindGroups {
-                    model,
-                    embed,
-                    head,
-                    layers,
-                });
+                commands.entity(entity).insert((
+                    ModelBindGroups {
+                        model,
+                        embed,
+                        head,
+                        layers,
+                    },
+                    ModelBuffers(buffers),
+                    ModelStates(states),
+                ));
             }
             _ => {
                 warn!("model bind group failed to queue");
@@ -1627,10 +1638,11 @@ fn queue_bind_group(
 
 pub struct ModelNode {
     query: QueryState<(
-        Entity,
         &'static Handle<Model>,
         &'static PromptTokens,
         &'static ModelBindGroups,
+        &'static ModelBuffers,
+        &'static ModelStates,
     )>,
 }
 
@@ -1664,23 +1676,17 @@ impl render_graph::Node for ModelNode {
         for (model, prompt_tokens, bind_group, buffer, states) in self
             .query
             .iter_manual(world)
-            .filter_map(|(entity, handle, prompt_tokens, bind_group)| {
+            .filter_map(|(handle, prompt_tokens, bind_group, buffers, states)| {
                 models
                     .get(handle)
-                    .map(|model| (entity, model, prompt_tokens, bind_group))
-            })
-            .filter_map(|(entity, model, prompt_tokens, bind_group)| {
-                let num_emb = model.model.num_emb as usize;
-                let num_tokens = prompt_tokens.len();
-                buffer_cache
-                    .get(&(num_emb, num_tokens))
-                    .zip(state_cache.get(&entity))
-                    .map(|((buffer, _), states)| (model, prompt_tokens, bind_group, buffer, states))
+                    .map(|model| (model, prompt_tokens, bind_group, buffers, states))
             })
         {
-            let num_layers = model.model.num_layers;
-            let num_emb = model.model.num_emb;
-            let num_vocab = model.model.num_vocab;
+            let GpuModel {
+                num_layers,
+                num_emb,
+                num_vocab,
+            } = model.model;
             let num_tokens = prompt_tokens.len() as u32;
 
             let buffer_size =
@@ -1728,6 +1734,21 @@ impl render_graph::Node for ModelNode {
                     pass.set_bind_group(1, &bind_group.layers[0].att_layer_norm, &[]);
                     pass.set_pipeline(pipeline);
                     pass.dispatch_workgroups(1, num_tokens, 1);
+                }
+
+                if let Some(pipeline) =
+                    pipeline_cache.get_compute_pipeline(pipeline.token_shift_pipeline)
+                {
+                    pass.set_pipeline(pipeline);
+
+                    pass.set_bind_group(1, &bind_group.layers[0].att_token_shift_k, &[]);
+                    pass.dispatch_workgroups(num_emb / 4 / BLOCK_SIZE, num_tokens, 1);
+
+                    pass.set_bind_group(1, &bind_group.layers[0].att_token_shift_v, &[]);
+                    pass.dispatch_workgroups(num_emb / 4 / BLOCK_SIZE, num_tokens, 1);
+
+                    pass.set_bind_group(1, &bind_group.layers[0].att_token_shift_r, &[]);
+                    pass.dispatch_workgroups(num_emb / 4 / BLOCK_SIZE, num_tokens, 1);
                 }
             }
         }

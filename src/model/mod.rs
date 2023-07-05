@@ -33,26 +33,21 @@ impl Plugin for ModelPlugin {
 #[derive(Clone, TypeUuid)]
 #[uuid = "60412308-ec8b-4fde-aac3-2a87d4838ccc"]
 pub struct Model {
+    pub info: ModelInfo,
+    pub tensors: Arc<ModelTensors>,
+}
+
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+pub struct ModelInfo {
     pub num_layers: usize,
     pub num_emb: usize,
     pub num_vocab: usize,
-    pub tensors: Arc<ModelTensors>,
 }
 
 pub struct ModelTensors {
     pub embed: Embed,
     pub head: Head,
     pub layers: Vec<Layer>,
-}
-
-impl std::fmt::Debug for Model {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ModelAsset")
-            .field("num_layers", &self.num_layers)
-            .field("num_emb", &self.num_emb)
-            .field("num_vocab", &self.num_vocab)
-            .finish()
-    }
 }
 
 pub struct LayerNorm {
@@ -199,16 +194,17 @@ impl AssetLoader for ModelAssetLoader {
                 });
             }
 
-            let tensors = Arc::new(ModelTensors {
-                embed,
-                head,
-                layers,
-            });
             load_context.set_default_asset(LoadedAsset::new(Model {
-                num_layers,
-                num_emb,
-                num_vocab,
-                tensors,
+                info: ModelInfo {
+                    num_layers,
+                    num_emb,
+                    num_vocab,
+                },
+                tensors: Arc::new(ModelTensors {
+                    embed,
+                    head,
+                    layers,
+                }),
             }));
             Ok(())
         })

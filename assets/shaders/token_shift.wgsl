@@ -17,12 +17,11 @@ fn token_shift(@builtin(global_invocation_id) invocation_id: vec3<u32>, @builtin
     let num_tokens = num_blocks.y;
 
     if index < stride {
-        if num_tokens > 1u {
-            let ti = token * stride + index;
-            let xx = select(x[ti - stride], sx[index], token == 0u);
-            output[ti] = mix(xx, x[ti], time_mix[index]);
+        let ti = token * stride + index;
+        if token == 0u {
+            output[ti] = mix(sx[index], x[ti], time_mix[index]);
         } else {
-            output[index] = mix(sx[index], x[index], time_mix[index]);
+            output[ti] = mix(x[ti - stride], x[ti], time_mix[index]);
         }
     }
 }

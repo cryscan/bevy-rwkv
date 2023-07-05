@@ -53,7 +53,7 @@ fn print_on_load(
 
             info!("{:?}", tokens);
             info!("{:#?}", string);
-            info!("{:#?}", model);
+            info!("{:#?}", model.info);
 
             commands.spawn((
                 PromptTokens(tokens.into_iter().map(u32::from).collect()),

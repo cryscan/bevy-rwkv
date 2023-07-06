@@ -1475,7 +1475,8 @@ impl EmbedBindGroup {
 pub struct GpuHeadBuffer {
     pub in_x: Buffer,
     pub x: Buffer,
-    pub logits: Buffer,
+    pub out: Buffer,
+    pub map: Buffer,
 }
 
 impl GpuHeadBuffer {
@@ -1492,7 +1493,13 @@ impl GpuHeadBuffer {
         Self {
             in_x: create_buffer(info.num_emb),
             x: create_buffer(info.num_emb),
-            logits: create_buffer(info.num_vocab),
+            out: create_buffer(info.num_vocab),
+            map: device.create_buffer(&BufferDescriptor {
+                label: None,
+                size: f32::min_size().get() * info.num_vocab as u64,
+                usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
         }
     }
 }
@@ -1549,7 +1556,7 @@ impl HeadBindGroup {
                 },
                 BindGroupEntry {
                     binding: 3,
-                    resource: buffer.logits.as_entire_binding(),
+                    resource: buffer.out.as_entire_binding(),
                 },
             ],
         });
@@ -1742,7 +1749,7 @@ impl render_graph::Node for ModelNode {
 
         self.state = match self.state {
             ModelNodeState::Init => {
-                let ready = [
+                match [
                     pipeline.embed_pipeline,
                     pipeline.layer_norm_pipeline,
                     pipeline.token_shift_pipeline,
@@ -1754,11 +1761,10 @@ impl render_graph::Node for ModelNode {
                 ]
                 .into_iter()
                 .map(|pipeline| pipeline_cache.get_compute_pipeline_state(pipeline))
-                .all(|state| matches!(state, &CachedPipelineState::Ok(_)));
-                if ready {
-                    ModelNodeState::Run
-                } else {
-                    ModelNodeState::Init
+                .all(|state| matches!(state, &CachedPipelineState::Ok(_)))
+                {
+                    true => ModelNodeState::Run,
+                    false => ModelNodeState::Init,
                 }
             }
             ModelNodeState::Run => ModelNodeState::Run,
@@ -1793,32 +1799,37 @@ impl render_graph::Node for ModelNode {
             } = model.model;
             let num_tokens = prompt_tokens.len() as u32;
 
-            let buffer_size =
-                BufferAddress::from(f32::min_size()) * BufferAddress::from(num_emb * num_tokens);
+            let buffer_size = f32::min_size().get() * (num_emb * num_tokens) as u64;
             let num_emb_vec4 = num_emb / 4;
             let num_vocab_vec4 = num_vocab / 4;
 
             match self.state {
                 ModelNodeState::Run => {
+                    let [embed_pipeline, layer_norm_pipeline, token_shift_pipeline, matmul_pipeline, token_mix_pipeline, squared_relu_pipeline, channel_mix_pipeline, add_pipeline] =
+                        [
+                            pipeline.embed_pipeline,
+                            pipeline.layer_norm_pipeline,
+                            pipeline.token_shift_pipeline,
+                            pipeline.matmul_pipeline,
+                            pipeline.token_mix_pipeline,
+                            pipeline.squared_relu_pipeline,
+                            pipeline.channel_mix_pipeline,
+                            pipeline.add_pipeline,
+                        ]
+                        .map(|pipeline| pipeline_cache.get_compute_pipeline(pipeline).unwrap());
+
                     let mut pass = render_context
                         .command_encoder()
                         .begin_compute_pass(&ComputePassDescriptor::default());
                     pass.set_bind_group(0, &bind_group.model, &[]);
 
-                    if let Some(pipeline) =
-                        pipeline_cache.get_compute_pipeline(pipeline.embed_pipeline)
-                    {
-                        pass.set_pipeline(pipeline);
-                        pass.set_bind_group(1, &bind_group.embed.embed, &[]);
-                        pass.dispatch_workgroups(num_emb / 4 / BLOCK_SIZE, num_tokens, 1);
-                    }
-                    if let Some(pipeline) =
-                        pipeline_cache.get_compute_pipeline(pipeline.layer_norm_pipeline)
-                    {
-                        pass.set_pipeline(pipeline);
-                        pass.set_bind_group(1, &bind_group.embed.layer_norm, &[]);
-                        pass.dispatch_workgroups(1, num_tokens, 1);
-                    }
+                    pass.set_pipeline(&embed_pipeline);
+                    pass.set_bind_group(1, &bind_group.embed.embed, &[]);
+                    pass.dispatch_workgroups(num_emb / 4 / BLOCK_SIZE, num_tokens, 1);
+
+                    pass.set_pipeline(&layer_norm_pipeline);
+                    pass.set_bind_group(1, &bind_group.embed.layer_norm, &[]);
+                    pass.dispatch_workgroups(1, num_tokens, 1);
 
                     drop(pass);
 
@@ -1837,133 +1848,81 @@ impl render_graph::Node for ModelNode {
 
                         pass.set_bind_group(0, &bind_group.model, &[]);
 
-                        if let Some(pipeline) =
-                            pipeline_cache.get_compute_pipeline(pipeline.layer_norm_pipeline)
-                        {
-                            pass.set_pipeline(pipeline);
-                            pass.set_bind_group(1, &layer.att_layer_norm, &[]);
-                            pass.dispatch_workgroups(1, num_tokens, 1);
-                        }
+                        pass.set_pipeline(&layer_norm_pipeline);
+                        pass.set_bind_group(1, &layer.att_layer_norm, &[]);
+                        pass.dispatch_workgroups(1, num_tokens, 1);
 
-                        if let Some(pipeline) =
-                            pipeline_cache.get_compute_pipeline(pipeline.token_shift_pipeline)
-                        {
-                            pass.set_pipeline(pipeline);
+                        pass.set_pipeline(&token_shift_pipeline);
 
-                            pass.set_bind_group(1, &layer.att_token_shift_k, &[]);
-                            pass.dispatch_workgroups(num_emb_vec4 / BLOCK_SIZE, num_tokens, 1);
+                        pass.set_bind_group(1, &layer.att_token_shift_k, &[]);
+                        pass.dispatch_workgroups(num_emb_vec4 / BLOCK_SIZE, num_tokens, 1);
 
-                            pass.set_bind_group(1, &layer.att_token_shift_v, &[]);
-                            pass.dispatch_workgroups(num_emb_vec4 / BLOCK_SIZE, num_tokens, 1);
+                        pass.set_bind_group(1, &layer.att_token_shift_v, &[]);
+                        pass.dispatch_workgroups(num_emb_vec4 / BLOCK_SIZE, num_tokens, 1);
 
-                            pass.set_bind_group(1, &layer.att_token_shift_r, &[]);
-                            pass.dispatch_workgroups(num_emb_vec4 / BLOCK_SIZE, num_tokens, 1);
-                        }
+                        pass.set_bind_group(1, &layer.att_token_shift_r, &[]);
+                        pass.dispatch_workgroups(num_emb_vec4 / BLOCK_SIZE, num_tokens, 1);
 
-                        if let Some(pipeline) =
-                            pipeline_cache.get_compute_pipeline(pipeline.matmul_pipeline)
-                        {
-                            pass.set_pipeline(pipeline);
+                        pass.set_pipeline(&matmul_pipeline);
 
-                            pass.set_bind_group(1, &layer.att_matmul_k, &[]);
-                            pass.dispatch_workgroups(1, num_emb_vec4, num_tokens);
+                        pass.set_bind_group(1, &layer.att_matmul_k, &[]);
+                        pass.dispatch_workgroups(1, num_emb_vec4, num_tokens);
 
-                            pass.set_bind_group(1, &layer.att_matmul_v, &[]);
-                            pass.dispatch_workgroups(1, num_emb_vec4, num_tokens);
+                        pass.set_bind_group(1, &layer.att_matmul_v, &[]);
+                        pass.dispatch_workgroups(1, num_emb_vec4, num_tokens);
 
-                            pass.set_bind_group(1, &layer.att_matmul_r, &[]);
-                            pass.dispatch_workgroups(1, num_emb_vec4, num_tokens);
-                        }
+                        pass.set_bind_group(1, &layer.att_matmul_r, &[]);
+                        pass.dispatch_workgroups(1, num_emb_vec4, num_tokens);
 
-                        if let Some(pipeline) =
-                            pipeline_cache.get_compute_pipeline(pipeline.token_mix_pipeline)
-                        {
-                            pass.set_pipeline(pipeline);
+                        pass.set_pipeline(&token_mix_pipeline);
 
-                            pass.set_bind_group(1, &layer.att_token_mix, &[]);
-                            pass.dispatch_workgroups(num_emb_vec4 / BLOCK_SIZE, 1, 1);
-                        }
+                        pass.set_bind_group(1, &layer.att_token_mix, &[]);
+                        pass.dispatch_workgroups(num_emb_vec4 / BLOCK_SIZE, 1, 1);
 
-                        if let Some(pipeline) =
-                            pipeline_cache.get_compute_pipeline(pipeline.matmul_pipeline)
-                        {
-                            pass.set_pipeline(pipeline);
-                            pass.set_bind_group(1, &layer.att_matmul_o, &[]);
-                            pass.dispatch_workgroups(1, num_emb_vec4, num_tokens);
-                        }
+                        pass.set_pipeline(&matmul_pipeline);
+                        pass.set_bind_group(1, &layer.att_matmul_o, &[]);
+                        pass.dispatch_workgroups(1, num_emb_vec4, num_tokens);
 
-                        if let Some(pipeline) =
-                            pipeline_cache.get_compute_pipeline(pipeline.add_pipeline)
-                        {
-                            pass.set_pipeline(pipeline);
-                            pass.set_bind_group(1, &layer.att_add, &[]);
-                            pass.dispatch_workgroups(num_emb_vec4 / BLOCK_SIZE, num_tokens, 1);
-                        }
+                        pass.set_pipeline(&add_pipeline);
+                        pass.set_bind_group(1, &layer.att_add, &[]);
+                        pass.dispatch_workgroups(num_emb_vec4 / BLOCK_SIZE, num_tokens, 1);
 
-                        if let Some(pipeline) =
-                            pipeline_cache.get_compute_pipeline(pipeline.layer_norm_pipeline)
-                        {
-                            pass.set_pipeline(pipeline);
-                            pass.set_bind_group(1, &layer.ffn_layer_norm, &[]);
-                            pass.dispatch_workgroups(1, num_tokens, 1);
-                        }
+                        pass.set_pipeline(&layer_norm_pipeline);
+                        pass.set_bind_group(1, &layer.ffn_layer_norm, &[]);
+                        pass.dispatch_workgroups(1, num_tokens, 1);
 
-                        if let Some(pipeline) =
-                            pipeline_cache.get_compute_pipeline(pipeline.token_shift_pipeline)
-                        {
-                            pass.set_pipeline(pipeline);
+                        pass.set_pipeline(&token_shift_pipeline);
 
-                            pass.set_bind_group(1, &layer.ffn_token_shift_k, &[]);
-                            pass.dispatch_workgroups(num_emb_vec4 / BLOCK_SIZE, num_tokens, 1);
+                        pass.set_bind_group(1, &layer.ffn_token_shift_k, &[]);
+                        pass.dispatch_workgroups(num_emb_vec4 / BLOCK_SIZE, num_tokens, 1);
 
-                            pass.set_bind_group(1, &layer.ffn_token_shift_r, &[]);
-                            pass.dispatch_workgroups(num_emb_vec4 / BLOCK_SIZE, num_tokens, 1);
-                        }
+                        pass.set_bind_group(1, &layer.ffn_token_shift_r, &[]);
+                        pass.dispatch_workgroups(num_emb_vec4 / BLOCK_SIZE, num_tokens, 1);
 
-                        if let Some(pipeline) =
-                            pipeline_cache.get_compute_pipeline(pipeline.matmul_pipeline)
-                        {
-                            pass.set_pipeline(pipeline);
+                        pass.set_pipeline(&matmul_pipeline);
 
-                            pass.set_bind_group(1, &layer.ffn_matmul_k, &[]);
-                            pass.dispatch_workgroups(1, 4 * num_emb_vec4, num_tokens);
+                        pass.set_bind_group(1, &layer.ffn_matmul_k, &[]);
+                        pass.dispatch_workgroups(1, 4 * num_emb_vec4, num_tokens);
 
-                            pass.set_bind_group(1, &layer.ffn_matmul_r, &[]);
-                            pass.dispatch_workgroups(1, num_emb_vec4, num_tokens);
-                        }
+                        pass.set_bind_group(1, &layer.ffn_matmul_r, &[]);
+                        pass.dispatch_workgroups(1, num_emb_vec4, num_tokens);
 
-                        if let Some(pipeline) =
-                            pipeline_cache.get_compute_pipeline(pipeline.squared_relu_pipeline)
-                        {
-                            pass.set_pipeline(pipeline);
+                        pass.set_pipeline(&squared_relu_pipeline);
 
-                            pass.set_bind_group(1, &layer.ffn_squared_relu, &[]);
-                            pass.dispatch_workgroups(4 * num_emb_vec4 / BLOCK_SIZE, num_tokens, 1);
-                        }
+                        pass.set_bind_group(1, &layer.ffn_squared_relu, &[]);
+                        pass.dispatch_workgroups(4 * num_emb_vec4 / BLOCK_SIZE, num_tokens, 1);
 
-                        if let Some(pipeline) =
-                            pipeline_cache.get_compute_pipeline(pipeline.matmul_pipeline)
-                        {
-                            pass.set_pipeline(pipeline);
-                            pass.set_bind_group(1, &layer.ffn_matmul_v, &[]);
-                            pass.dispatch_workgroups(1, num_emb_vec4, num_tokens);
-                        }
+                        pass.set_pipeline(&matmul_pipeline);
+                        pass.set_bind_group(1, &layer.ffn_matmul_v, &[]);
+                        pass.dispatch_workgroups(1, num_emb_vec4, num_tokens);
 
-                        if let Some(pipeline) =
-                            pipeline_cache.get_compute_pipeline(pipeline.channel_mix_pipeline)
-                        {
-                            pass.set_pipeline(pipeline);
-                            pass.set_bind_group(1, &layer.ffn_channel_mix, &[]);
-                            pass.dispatch_workgroups(num_emb_vec4 / BLOCK_SIZE, num_tokens, 1);
-                        }
+                        pass.set_pipeline(&channel_mix_pipeline);
+                        pass.set_bind_group(1, &layer.ffn_channel_mix, &[]);
+                        pass.dispatch_workgroups(num_emb_vec4 / BLOCK_SIZE, num_tokens, 1);
 
-                        if let Some(pipeline) =
-                            pipeline_cache.get_compute_pipeline(pipeline.add_pipeline)
-                        {
-                            pass.set_pipeline(pipeline);
-                            pass.set_bind_group(1, &layer.ffn_add, &[]);
-                            pass.dispatch_workgroups(num_emb_vec4 / BLOCK_SIZE, num_tokens, 1);
-                        }
+                        pass.set_pipeline(&add_pipeline);
+                        pass.set_bind_group(1, &layer.ffn_add, &[]);
+                        pass.dispatch_workgroups(num_emb_vec4 / BLOCK_SIZE, num_tokens, 1);
 
                         drop(pass);
 
@@ -1983,29 +1942,20 @@ impl render_graph::Node for ModelNode {
                         0,
                         buffer_size,
                     );
-                    {
-                        let mut pass = render_context
-                            .command_encoder()
-                            .begin_compute_pass(&ComputePassDescriptor::default());
 
-                        pass.set_bind_group(0, &bind_group.model, &[]);
+                    let mut pass = render_context
+                        .command_encoder()
+                        .begin_compute_pass(&ComputePassDescriptor::default());
 
-                        if let Some(pipeline) =
-                            pipeline_cache.get_compute_pipeline(pipeline.layer_norm_pipeline)
-                        {
-                            pass.set_pipeline(pipeline);
-                            pass.set_bind_group(1, &bind_group.head.layer_norm, &[]);
-                            pass.dispatch_workgroups(1, num_tokens, 1);
-                        }
+                    pass.set_bind_group(0, &bind_group.model, &[]);
 
-                        if let Some(pipeline) =
-                            pipeline_cache.get_compute_pipeline(pipeline.matmul_pipeline)
-                        {
-                            pass.set_pipeline(pipeline);
-                            pass.set_bind_group(1, &bind_group.head.matmul, &[]);
-                            pass.dispatch_workgroups(1, num_vocab_vec4, num_tokens);
-                        }
-                    }
+                    pass.set_pipeline(&layer_norm_pipeline);
+                    pass.set_bind_group(1, &bind_group.head.layer_norm, &[]);
+                    pass.dispatch_workgroups(1, num_tokens, 1);
+
+                    pass.set_pipeline(&matmul_pipeline);
+                    pass.set_bind_group(1, &bind_group.head.matmul, &[]);
+                    pass.dispatch_workgroups(1, num_vocab_vec4, num_tokens);
                 }
                 _ => {}
             }

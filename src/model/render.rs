@@ -25,6 +25,7 @@ impl Plugin for RenderPlugin {
             .init_resource::<ModelPipeline>()
             .init_resource::<StateCache>()
             .init_resource::<BufferCache>()
+            .add_system(prepare_model.in_set(RenderSet::Prepare))
             .add_system(queue_bind_group.in_set(RenderSet::Queue))
             .add_system(buffer_cache_system.in_set(RenderSet::Cleanup));
 
@@ -1638,15 +1639,12 @@ fn buffer_cache_system(mut buffer_cache: ResMut<BufferCache>) {
     buffer_cache.0.retain(|_, (_, counter)| *counter < 3);
 }
 
-fn queue_bind_group(
+fn prepare_model(
     mut commands: Commands,
     device: Res<RenderDevice>,
     queue: Res<RenderQueue>,
-    pipeline: Res<ModelPipeline>,
     models: Res<RenderAssets<Model>>,
-    images: Res<RenderAssets<Image>>,
-    fallback_image: Res<FallbackImage>,
-    mut state_cache: ResMut<StateCache>,
+    mut _state_cache: ResMut<StateCache>,
     mut buffer_cache: ResMut<BufferCache>,
     query: Query<(Entity, &Handle<Model>, &PromptTokens)>,
 ) {
@@ -1657,15 +1655,38 @@ fn queue_bind_group(
                 .map(|model| (entity, model, prompt_tokens))
         })
     {
+        // let _states = state_cache.retreive(&device, entity, model.info);
+        let states = Arc::new(GpuStates::new(&device, model.info));
+        let buffers = buffer_cache.retreive(&device, &queue, model.info, &prompt_tokens);
+        commands
+            .entity(entity)
+            .insert((ModelStates(states), ModelBuffers(buffers)));
+    }
+}
+
+fn queue_bind_group(
+    mut commands: Commands,
+    device: Res<RenderDevice>,
+    pipeline: Res<ModelPipeline>,
+    models: Res<RenderAssets<Model>>,
+    images: Res<RenderAssets<Image>>,
+    fallback_image: Res<FallbackImage>,
+    query: Query<(Entity, &Handle<Model>, &ModelBuffers, &ModelStates)>,
+) {
+    for (entity, model, buffers, states) in
+        query
+            .iter()
+            .filter_map(|(entity, handle, buffers, states)| {
+                models
+                    .get(handle)
+                    .map(|model| (entity, model, buffers, states))
+            })
+    {
         let ModelInfo {
             num_layers,
             num_emb: _,
             num_vocab: _,
         } = model.info;
-
-        let _states = state_cache.retreive(&device, entity, model.info);
-        let states = Arc::new(GpuStates::new(&device, model.info));
-        let buffers = buffer_cache.retreive(&device, &queue, model.info, &prompt_tokens);
 
         let embed = EmbedBindGroup::create(
             &device,
@@ -1697,16 +1718,12 @@ fn queue_bind_group(
         match (model, embed, head, layers) {
             (Some(model), Some(embed), Some(head), layers) if layers.len() == num_layers => {
                 let model = model.bind_group;
-                commands.entity(entity).insert((
-                    ModelBindGroups {
-                        model,
-                        embed,
-                        head,
-                        layers,
-                    },
-                    ModelBuffers(buffers),
-                    ModelStates(states),
-                ));
+                commands.entity(entity).insert(ModelBindGroups {
+                    model,
+                    embed,
+                    head,
+                    layers,
+                });
             }
             _ => {
                 warn!("model bind group failed to queue");
@@ -1956,6 +1973,16 @@ impl render_graph::Node for ModelNode {
                     pass.set_pipeline(&matmul_pipeline);
                     pass.set_bind_group(1, &bind_group.head.matmul, &[]);
                     pass.dispatch_workgroups(1, num_vocab_vec4, num_tokens);
+
+                    drop(pass);
+
+                    render_context.command_encoder().copy_buffer_to_buffer(
+                        &buffers.head.out,
+                        f32::min_size().get() * ((num_tokens - 1) * num_vocab) as u64,
+                        &buffers.head.map,
+                        0,
+                        f32::min_size().get() * num_vocab as u64,
+                    )
                 }
                 _ => {}
             }

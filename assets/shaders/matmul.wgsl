@@ -35,12 +35,13 @@ fn matmul(@builtin(global_invocation_id) invocation_id: vec3<u32>) {
 
         // read 4 rows from the matrix, each with 4 unpacked floats, forming a 4x4 sub-block
         var data: vec2<u32>;
-        var m: vec4<f32>;
+        var m: mat4x4<f32>;
 
-        data = matrix[ci]; m = vec4<f32>(unpack2x16float(data.x), unpack2x16float(data.y)); local_sum[index].x += dot(x, m); ci += stride.x;
-        data = matrix[ci]; m = vec4<f32>(unpack2x16float(data.x), unpack2x16float(data.y)); local_sum[index].y += dot(x, m); ci += stride.x;
-        data = matrix[ci]; m = vec4<f32>(unpack2x16float(data.x), unpack2x16float(data.y)); local_sum[index].z += dot(x, m); ci += stride.x;
-        data = matrix[ci]; m = vec4<f32>(unpack2x16float(data.x), unpack2x16float(data.y)); local_sum[index].w += dot(x, m);
+        data = matrix[ci]; m[0] = vec4<f32>(unpack2x16float(data.x), unpack2x16float(data.y)); ci += stride.x;
+        data = matrix[ci]; m[1] = vec4<f32>(unpack2x16float(data.x), unpack2x16float(data.y)); ci += stride.x;
+        data = matrix[ci]; m[2] = vec4<f32>(unpack2x16float(data.x), unpack2x16float(data.y)); ci += stride.x;
+        data = matrix[ci]; m[3] = vec4<f32>(unpack2x16float(data.x), unpack2x16float(data.y));
+        local_sum[index] += transpose(m) * x;
     }
     workgroupBarrier();
 
